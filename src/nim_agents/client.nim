@@ -177,7 +177,9 @@ proc fromHarbor*(client: HarborClient): AgentClient =
 
 when not defined(js):
   proc fromStdioAcpAgent*(cmd: string; args: openArray[string] = [];
-      defaultTimeoutMs = DefaultNativeStdioTimeoutMs): AgentClient =
+      defaultTimeoutMs = -1;
+      idleTimeoutMs = DefaultNativeStdioTimeoutMs;
+      hardDeadlineMs = DefaultNativeStdioHardDeadlineMs): AgentClient =
     ## Generic factory: spawn ``cmd`` (a stdio-speaking ACP server)
     ## with ``args`` and wrap it in an :type:`AgentClient`. ``cmd`` is
     ## resolved via :proc:`findExe` when it looks like a bare binary
@@ -185,6 +187,13 @@ when not defined(js):
     ## building block by the kind-specific factories below — callers
     ## that already know exactly which binary they want should reach
     ## for this entrypoint directly.
+    ##
+    ## *Timeout knobs (follow-up 1).*  ``idleTimeoutMs`` bounds the
+    ## silence between frames (default 60 s); ``hardDeadlineMs`` is
+    ## the wall-clock cap (default 30 min).  The legacy
+    ## ``defaultTimeoutMs`` parameter is still accepted as an alias for
+    ## ``idleTimeoutMs`` for backwards compatibility — when non-
+    ## negative it overrides the explicit ``idleTimeoutMs`` value.
     if cmd.len == 0:
       raise newException(AcpError,
         "fromStdioAcpAgent: empty command")
@@ -196,7 +205,9 @@ when not defined(js):
         "fromStdioAcpAgent: command not found on PATH: " & cmd)
     let argsSeq = @args
     let transport = newNativeStdioAcpTransport(resolved, argsSeq,
-      defaultTimeoutMs = defaultTimeoutMs)
+      defaultTimeoutMs = defaultTimeoutMs,
+      idleTimeoutMs = idleTimeoutMs,
+      hardDeadlineMs = hardDeadlineMs)
     fromAcp(newAcpClient(transport))
 
   proc resolveFirstOnPath(candidates: openArray[string]): string =
@@ -210,7 +221,9 @@ when not defined(js):
     ""
 
   proc fromClaudeCodeAcp*(extraArgs: seq[string] = @[];
-      defaultTimeoutMs = DefaultNativeStdioTimeoutMs): AgentClient =
+      defaultTimeoutMs = -1;
+      idleTimeoutMs = DefaultNativeStdioTimeoutMs;
+      hardDeadlineMs = DefaultNativeStdioHardDeadlineMs): AgentClient =
     ## Convenience factory that spawns the ``claude-code-acp`` (formerly
     ## ``@anthropic-ai/claude-code-acp``, now packaged in nixpkgs as
     ## ``claude-agent-acp``) binary as an ACP-speaking subprocess and
@@ -226,10 +239,15 @@ when not defined(js):
       raise newException(AcpError,
         "fromClaudeCodeAcp: none of " & $candidates &
         " resolved on PATH; set ISONIM_ACP_AGENT_CMD to override")
-    fromStdioAcpAgent(binary, extraArgs, defaultTimeoutMs = defaultTimeoutMs)
+    fromStdioAcpAgent(binary, extraArgs,
+      defaultTimeoutMs = defaultTimeoutMs,
+      idleTimeoutMs = idleTimeoutMs,
+      hardDeadlineMs = hardDeadlineMs)
 
   proc fromCodexAcp*(extraArgs: seq[string] = @[];
-      defaultTimeoutMs = DefaultNativeStdioTimeoutMs): AgentClient =
+      defaultTimeoutMs = -1;
+      idleTimeoutMs = DefaultNativeStdioTimeoutMs;
+      hardDeadlineMs = DefaultNativeStdioHardDeadlineMs): AgentClient =
     ## Sibling of :proc:`fromClaudeCodeAcp` for the OpenAI Codex ACP
     ## adapter (``pkgs.codex-acp`` in nixpkgs).  Resolution order:
     ## ``$ISONIM_CODEX_ACP_CMD`` env → ``findExe("codex-acp")``.
@@ -242,11 +260,16 @@ when not defined(js):
       raise newException(AcpError,
         "fromCodexAcp: none of " & $candidates &
         " resolved on PATH; set ISONIM_CODEX_ACP_CMD to override")
-    fromStdioAcpAgent(binary, extraArgs, defaultTimeoutMs = defaultTimeoutMs)
+    fromStdioAcpAgent(binary, extraArgs,
+      defaultTimeoutMs = defaultTimeoutMs,
+      idleTimeoutMs = idleTimeoutMs,
+      hardDeadlineMs = hardDeadlineMs)
 
   proc fromAcpAgent*(kind: AcpAgentKind; extraArgs: seq[string] = @[];
       cmd: string = ""; args: seq[string] = @[];
-      defaultTimeoutMs = DefaultNativeStdioTimeoutMs): AgentClient =
+      defaultTimeoutMs = -1;
+      idleTimeoutMs = DefaultNativeStdioTimeoutMs;
+      hardDeadlineMs = DefaultNativeStdioHardDeadlineMs): AgentClient =
     ## Kind-discriminated convenience entry point so HTTP handlers,
     ## CLI dispatchers and tests can switch backends with a single
     ## ``case`` rather than an if/else tree.
@@ -259,16 +282,25 @@ when not defined(js):
     ##                 stay separable from per-call overrides.
     case kind
     of aakClaude:
-      fromClaudeCodeAcp(extraArgs, defaultTimeoutMs = defaultTimeoutMs)
+      fromClaudeCodeAcp(extraArgs,
+        defaultTimeoutMs = defaultTimeoutMs,
+        idleTimeoutMs = idleTimeoutMs,
+        hardDeadlineMs = hardDeadlineMs)
     of aakCodex:
-      fromCodexAcp(extraArgs, defaultTimeoutMs = defaultTimeoutMs)
+      fromCodexAcp(extraArgs,
+        defaultTimeoutMs = defaultTimeoutMs,
+        idleTimeoutMs = idleTimeoutMs,
+        hardDeadlineMs = hardDeadlineMs)
     of aakCustom:
       if cmd.len == 0:
         raise newException(AcpError,
           "fromAcpAgent(aakCustom): ``cmd`` is required for the custom backend")
       var combined = args
       combined.add extraArgs
-      fromStdioAcpAgent(cmd, combined, defaultTimeoutMs = defaultTimeoutMs)
+      fromStdioAcpAgent(cmd, combined,
+        defaultTimeoutMs = defaultTimeoutMs,
+        idleTimeoutMs = idleTimeoutMs,
+        hardDeadlineMs = hardDeadlineMs)
 
 proc toHarborContentBlock*(item: ContentBlock): HarborContentBlock =
   case item.kind
