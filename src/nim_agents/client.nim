@@ -1,6 +1,8 @@
 import std/json
 import std/strutils
 import std/uri
+when not defined(js):
+  import std/os
 import nim_acp
 import nim_agent_harbor
 import nim_everywhere
@@ -165,6 +167,33 @@ proc fromAcp*(client: AcpClient): AgentClient =
 
 proc fromHarbor*(client: HarborClient): AgentClient =
   AgentClient(backend: abkHarbor, harbor: client)
+
+when not defined(js):
+  proc fromClaudeCodeAcp*(extraArgs: seq[string] = @[];
+      defaultTimeoutMs = DefaultNativeStdioTimeoutMs): AgentClient =
+    ## Convenience factory that spawns the ``claude-code-acp`` (formerly
+    ## ``@anthropic-ai/claude-code-acp``, now packaged in nixpkgs as
+    ## ``claude-agent-acp``) binary as an ACP-speaking subprocess and
+    ## wraps it in an :type:`AgentClient`. The ``ISONIM_ACP_AGENT_CMD``
+    ## environment variable overrides the binary, which is the recommended
+    ## way to redirect tests at a stub.
+    let envOverride = getEnv("ISONIM_ACP_AGENT_CMD")
+    let candidates =
+      if envOverride.len > 0: @[envOverride]
+      else: @["claude-code-acp", "claude-agent-acp"]
+    var binary = ""
+    for c in candidates:
+      let resolved = findExe(c)
+      if resolved.len > 0:
+        binary = resolved
+        break
+    if binary.len == 0:
+      raise newException(AcpError,
+        "fromClaudeCodeAcp: none of " & $candidates &
+        " resolved on PATH; set ISONIM_ACP_AGENT_CMD to override")
+    let transport = newNativeStdioAcpTransport(binary, extraArgs,
+      defaultTimeoutMs = defaultTimeoutMs)
+    fromAcp(newAcpClient(transport))
 
 proc toHarborContentBlock*(item: ContentBlock): HarborContentBlock =
   case item.kind
