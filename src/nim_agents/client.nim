@@ -608,6 +608,12 @@ proc acpUpdatesToAgentEvents*(sessionId: string;
   for update in updates:
     result.add acpUpdateToAgentEvent(sessionId, update)
 
+type
+  AgentEventCallback* = proc(event: AgentEvent) {.closure, gcsafe.}
+    ## Called once per decoded agent event during streaming prompt delivery.
+    ## Invoked synchronously from the transport reader loop; callbacks must not
+    ## block on additional frames from the same transport.
+
 proc readAgentEvents*(client: var AgentClient; session: AgentSession): seq[AgentEvent] =
   case client.backend
   of abkAcp:
@@ -659,6 +665,33 @@ proc sendPrompt*(client: var AgentClient; session: AgentSession;
         updates: client.acp.drainUpdates())
   of abkHarbor:
     discard client.harbor.sendPrompt(session.id, prompt.toHarborContentBlocks())
+    PromptTurn(session: session, stopReason: srEndTurn, updates: @[])
+
+proc sendPromptStreaming*(client: var AgentClient; session: AgentSession;
+    prompt: seq[ContentBlock];
+    onEvent: AgentEventCallback): PromptTurn =
+  ## Streaming variant of :proc:`sendPrompt`. ACP clients receive events as
+  ## transport notifications arrive. Harbor currently falls back to buffered
+  ## polling after the prompt completes.
+  case client.backend
+  of abkAcp:
+    let sessionId = session.id
+    var collected: seq[SessionUpdate] = @[]
+    let handler: SessionUpdateHandler = proc(update: SessionUpdate) =
+      collected.add update
+      if onEvent != nil:
+        onEvent(acpUpdateToAgentEvent(sessionId, update))
+    let response = client.acp.sendPromptStreaming(
+      PromptRequest(sessionId: sessionId, prompt: prompt), handler)
+    PromptTurn(session: session, stopReason: response.stopReason,
+        updates: collected)
+  of abkHarbor:
+    discard client.harbor.sendPrompt(session.id, prompt.toHarborContentBlocks())
+    let mapped = harborEventsToAgentEvents(session.id,
+      client.harbor.readSessionEvents(session.id))
+    if onEvent != nil:
+      for event in mapped:
+        onEvent(event)
     PromptTurn(session: session, stopReason: srEndTurn, updates: @[])
 
 proc requireHarbor(client: AgentClient) =
