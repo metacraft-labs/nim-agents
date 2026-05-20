@@ -699,6 +699,70 @@ proc sendPrompt*(client: var AgentClient; session: AgentSession;
     discard client.harbor.sendPrompt(session.id, prompt.toHarborContentBlocks())
     PromptTurn(session: session, stopReason: srEndTurn, updates: @[])
 
+# --------------------------------------------------------------------------- #
+#  Inject-prompt primitive (CMP-M3b).
+#
+#  Lets external callers push a user message into a running ACP session
+#  that the agent picks up on its next turn.  The queue lives on the
+#  underlying :type:`AcpTransport`; these wrappers are thin pass-throughs
+#  exposed at the :type:`AgentClient` surface so daemon/CLI/AI-assistant
+#  callers don't have to descend through the ACP client layer.
+#
+#  Harbor backend is currently rejected with a clear :type:`AcpError`
+#  ("not supported on Agent Harbor backend yet") — Harbor's HTTP/SSE
+#  model doesn't have an obvious inject point.  Lands later if needed.
+# --------------------------------------------------------------------------- #
+
+proc injectPrompt*(client: var AgentClient; sessionId, text: string) =
+  ## Queue a user message for the named session.  Picked up on the
+  ## next :proc:`sendPrompt` / :proc:`sendPromptStreaming` call by the
+  ## campaign loop (CMP-M4 wires the consumer side).  Thread-safe:
+  ## the underlying :type:`AcpTransport`'s injection queue is
+  ## :type:`Lock`-protected on native builds.
+  ##
+  ## Raises :type:`AcpError` when the backend is Agent Harbor — the
+  ## HTTP/SSE model doesn't have a natural inject point yet.
+  case client.backend
+  of abkAcp:
+    if client.acp.injectUserMessage == nil:
+      raise newException(AcpError,
+        "ACP client has no injectUserMessage hook; rebuild the client " &
+        "via newAcpClient(transport) so injection closures are wired")
+    client.acp.injectUserMessage(sessionId, text)
+  of abkHarbor:
+    raise newException(AcpError,
+      "injectPrompt: injection not supported on Agent Harbor backend yet")
+
+proc takeQueuedInjections*(client: var AgentClient;
+    sessionId: string): seq[string] =
+  ## Atomically drain the queue and return the texts in FIFO order.
+  ## Returns ``@[]`` when no pending messages.  Raises
+  ## :type:`AcpError` for the Harbor backend (symmetric with
+  ## :proc:`injectPrompt`).
+  case client.backend
+  of abkAcp:
+    if client.acp.takeQueuedInjections == nil:
+      return @[]
+    for entry in client.acp.takeQueuedInjections(sessionId):
+      result.add entry.text
+  of abkHarbor:
+    raise newException(AcpError,
+      "takeQueuedInjections: injection not supported on Agent Harbor backend yet")
+
+proc peekQueuedInjections*(client: var AgentClient;
+    sessionId: string): seq[string] =
+  ## Read-only inspection (for logging / debug).  Raises
+  ## :type:`AcpError` for Harbor.
+  case client.backend
+  of abkAcp:
+    if client.acp.peekQueuedInjections == nil:
+      return @[]
+    for entry in client.acp.peekQueuedInjections(sessionId):
+      result.add entry.text
+  of abkHarbor:
+    raise newException(AcpError,
+      "peekQueuedInjections: injection not supported on Agent Harbor backend yet")
+
 proc sendPromptStreaming*(client: var AgentClient; session: AgentSession;
     prompt: seq[ContentBlock];
     onEvent: AgentEventCallback): PromptTurn =
