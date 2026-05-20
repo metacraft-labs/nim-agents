@@ -9,6 +9,7 @@ build-native:
     nim c {{paths}} tests/test_agents.nim
     nim c {{paths}} tests/test_consumers.nim
     nim c {{paths}} tests/test_native_stdio_acp_transport.nim
+    nim c {{paths}} tests/test_codex_acp_smoke.nim
 
 build-js:
     nim js {{paths}} tests/test_agents.nim
@@ -20,6 +21,7 @@ test-native:
     nim c -r {{paths}} tests/test_agents.nim
     nim c -r {{paths}} tests/test_consumers.nim
     nim c -r {{paths}} tests/test_native_stdio_acp_transport.nim
+    nim c -r {{paths}} tests/test_codex_acp_smoke.nim
 
 test-js:
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_agents.nim
@@ -31,6 +33,7 @@ lint-nim:
     nim check {{paths}} tests/test_agents.nim
     nim check {{paths}} tests/test_consumers.nim
     nim check {{paths}} tests/test_native_stdio_acp_transport.nim
+    nim check {{paths}} tests/test_codex_acp_smoke.nim
 
 lint-nix:
     nixfmt --check flake.nix

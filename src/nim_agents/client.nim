@@ -11,6 +11,13 @@ type
   AgentBackendKind* = enum
     abkAcp
     abkHarbor
+  AcpAgentKind* = enum
+    ## Which stdio ACP server to spawn when callers don't supply a
+    ## binary path directly. ``aakCustom`` defers the choice to the
+    ## caller (binary + args must be passed alongside).
+    aakClaude = "claude"
+    aakCodex = "codex"
+    aakCustom = "custom"
   AgentSession* = object
     id*: string
     taskId*: string
@@ -169,6 +176,39 @@ proc fromHarbor*(client: HarborClient): AgentClient =
   AgentClient(backend: abkHarbor, harbor: client)
 
 when not defined(js):
+  proc fromStdioAcpAgent*(cmd: string; args: openArray[string] = [];
+      defaultTimeoutMs = DefaultNativeStdioTimeoutMs): AgentClient =
+    ## Generic factory: spawn ``cmd`` (a stdio-speaking ACP server)
+    ## with ``args`` and wrap it in an :type:`AgentClient`. ``cmd`` is
+    ## resolved via :proc:`findExe` when it looks like a bare binary
+    ## name; absolute paths are passed straight through. Used as the
+    ## building block by the kind-specific factories below — callers
+    ## that already know exactly which binary they want should reach
+    ## for this entrypoint directly.
+    if cmd.len == 0:
+      raise newException(AcpError,
+        "fromStdioAcpAgent: empty command")
+    let resolved =
+      if cmd.contains(DirSep) or fileExists(cmd): cmd
+      else: findExe(cmd)
+    if resolved.len == 0:
+      raise newException(AcpError,
+        "fromStdioAcpAgent: command not found on PATH: " & cmd)
+    let argsSeq = @args
+    let transport = newNativeStdioAcpTransport(resolved, argsSeq,
+      defaultTimeoutMs = defaultTimeoutMs)
+    fromAcp(newAcpClient(transport))
+
+  proc resolveFirstOnPath(candidates: openArray[string]): string =
+    for c in candidates:
+      if c.len == 0: continue
+      let resolved =
+        if c.contains(DirSep) or fileExists(c): c
+        else: findExe(c)
+      if resolved.len > 0:
+        return resolved
+    ""
+
   proc fromClaudeCodeAcp*(extraArgs: seq[string] = @[];
       defaultTimeoutMs = DefaultNativeStdioTimeoutMs): AgentClient =
     ## Convenience factory that spawns the ``claude-code-acp`` (formerly
@@ -181,19 +221,54 @@ when not defined(js):
     let candidates =
       if envOverride.len > 0: @[envOverride]
       else: @["claude-code-acp", "claude-agent-acp"]
-    var binary = ""
-    for c in candidates:
-      let resolved = findExe(c)
-      if resolved.len > 0:
-        binary = resolved
-        break
+    let binary = resolveFirstOnPath(candidates)
     if binary.len == 0:
       raise newException(AcpError,
         "fromClaudeCodeAcp: none of " & $candidates &
         " resolved on PATH; set ISONIM_ACP_AGENT_CMD to override")
-    let transport = newNativeStdioAcpTransport(binary, extraArgs,
-      defaultTimeoutMs = defaultTimeoutMs)
-    fromAcp(newAcpClient(transport))
+    fromStdioAcpAgent(binary, extraArgs, defaultTimeoutMs = defaultTimeoutMs)
+
+  proc fromCodexAcp*(extraArgs: seq[string] = @[];
+      defaultTimeoutMs = DefaultNativeStdioTimeoutMs): AgentClient =
+    ## Sibling of :proc:`fromClaudeCodeAcp` for the OpenAI Codex ACP
+    ## adapter (``pkgs.codex-acp`` in nixpkgs).  Resolution order:
+    ## ``$ISONIM_CODEX_ACP_CMD`` env → ``findExe("codex-acp")``.
+    let envOverride = getEnv("ISONIM_CODEX_ACP_CMD")
+    let candidates =
+      if envOverride.len > 0: @[envOverride]
+      else: @["codex-acp"]
+    let binary = resolveFirstOnPath(candidates)
+    if binary.len == 0:
+      raise newException(AcpError,
+        "fromCodexAcp: none of " & $candidates &
+        " resolved on PATH; set ISONIM_CODEX_ACP_CMD to override")
+    fromStdioAcpAgent(binary, extraArgs, defaultTimeoutMs = defaultTimeoutMs)
+
+  proc fromAcpAgent*(kind: AcpAgentKind; extraArgs: seq[string] = @[];
+      cmd: string = ""; args: seq[string] = @[];
+      defaultTimeoutMs = DefaultNativeStdioTimeoutMs): AgentClient =
+    ## Kind-discriminated convenience entry point so HTTP handlers,
+    ## CLI dispatchers and tests can switch backends with a single
+    ## ``case`` rather than an if/else tree.
+    ##
+    ## ``aakClaude`` → :proc:`fromClaudeCodeAcp` (``extraArgs`` is forwarded).
+    ## ``aakCodex``  → :proc:`fromCodexAcp` (``extraArgs`` is forwarded).
+    ## ``aakCustom`` → :proc:`fromStdioAcpAgent` — the caller must supply
+    ##                 ``cmd`` (and optionally ``args``); ``extraArgs``
+    ##                 is appended after ``args`` so config-level args
+    ##                 stay separable from per-call overrides.
+    case kind
+    of aakClaude:
+      fromClaudeCodeAcp(extraArgs, defaultTimeoutMs = defaultTimeoutMs)
+    of aakCodex:
+      fromCodexAcp(extraArgs, defaultTimeoutMs = defaultTimeoutMs)
+    of aakCustom:
+      if cmd.len == 0:
+        raise newException(AcpError,
+          "fromAcpAgent(aakCustom): ``cmd`` is required for the custom backend")
+      var combined = args
+      combined.add extraArgs
+      fromStdioAcpAgent(cmd, combined, defaultTimeoutMs = defaultTimeoutMs)
 
 proc toHarborContentBlock*(item: ContentBlock): HarborContentBlock =
   case item.kind
