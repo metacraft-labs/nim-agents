@@ -139,6 +139,7 @@ type
     eventsUrl*: string
     leader*: string
     workspacePath*: string
+    workingCopyMode*: string
     raw*: JsonNode
   AgentMilestoneFile* = object
     path*: string
@@ -183,6 +184,13 @@ proc toHarborContentBlocks*(items: openArray[ContentBlock]): seq[
     HarborContentBlock] =
   for item in items:
     result.add item.toHarborContentBlock()
+
+proc promptText*(items: openArray[ContentBlock]): string =
+  for item in items:
+    if item.kind == cbText and item.text.len > 0:
+      if result.len > 0:
+        result.add "\n\n"
+      result.add item.text
 
 proc defaultWorkspaceContext*(cwd = ""): AgentWorkspaceContext =
   AgentWorkspaceContext(repoMode: "none", cwd: cwd)
@@ -243,21 +251,21 @@ proc buildHarborTaskRequest*(config: HarborTaskConfig): CreateTaskRequest =
   result = CreateTaskRequest(
     tenantId: config.workspace.tenantId,
     projectId: config.workspace.projectId,
-    prompt: config.prompt.toHarborContentBlocks(),
+    prompt: promptText(config.prompt),
     repo: RepoConfig(
       mode: repoMode,
       url: config.workspace.repoUrl,
       branch: config.workspace.branch,
       commit: config.workspace.commit),
     runtime: defaultRuntime(),
-    workspace: defaultWorkspace(),
+    workspacePath: config.workspace.cwd,
+    workingCopyMode: config.workspace.workingCopyMode,
+    executionHostId: config.workspace.executionHostId,
     sandbox: defaultSandbox(),
     delivery: defaultDelivery(),
     agents: @[harborAgentConfig(config.acpAgent)],
     output: defaultOutput(),
     labels: if config.labels == nil: newJObject() else: config.labels)
-  result.workspace.executionHostId = config.workspace.executionHostId
-  result.workspace.workingCopyMode = config.workspace.workingCopyMode
   if config.workspace.cwd.len > 0:
     result.labels["cwd"] = %config.workspace.cwd
 
@@ -362,7 +370,8 @@ proc harborEventToAgentEvent*(sessionId: string;
     case event.status
     of "connecting", "authenticating", "connected", "streaming", "ready",
         "running", "provisioning", "retrying", "cancelling":
-      if event.status == "ready" and event.kind == hekWorkspace:
+      if event.kind == hekWorkspace and
+          (event.status == "ready" or event.mountPath.len > 0):
         result.kind = aekWorkspaceReady
         result.state = acsConnected
         result.workspacePath = event.mountPath
@@ -383,8 +392,14 @@ proc harborEventToAgentEvent*(sessionId: string;
       result.state = acsError
       result.stopReason = srError
     else:
-      result.kind = aekStatus
-      result.state = acsStreaming
+      if event.kind == hekWorkspace and event.mountPath.len > 0:
+        result.kind = aekWorkspaceReady
+        result.state = acsConnected
+        result.workspacePath = event.mountPath
+        result.workingCopyMode = event.workingCopyMode
+      else:
+        result.kind = aekStatus
+        result.state = acsStreaming
     result.text = event.message
   else:
     let rawType = event.raw{"type"}.getStr("")
@@ -588,10 +603,22 @@ proc changedFiles*(client: AgentClient; session: AgentSession; page = 0;
   if path.len > 0: query.add "path=" & encodeUrl(path)
   if snapshotId.len > 0: query.add "snapshotId=" & encodeUrl(snapshotId)
   let suffix = if query.len > 0: "?" & query.join("&") else: ""
-  let node = parseJson(client.harborGet("/api/v1/sessions/" & session.id &
+  let rawNode = parseJson(client.harborGet("/api/v1/sessions/" & session.id &
     "/files" & suffix).body)
+  let node =
+    if rawNode.kind == JString:
+      parseJson(rawNode.getStr())
+    else:
+      rawNode
   result.raw = node
-  for item in node{"items"}.items:
+  let itemsNode =
+    if node.kind == JArray:
+      node
+    elif node.kind == JObject and node.hasKey("items"):
+      node["items"]
+    else:
+      newJArray()
+  for item in itemsNode.items:
     result.items.add fileStatFromJson(item)
   result.total = node{"total"}.getInt(result.items.len)
   result.page = node{"page"}.getInt(0)
@@ -639,26 +666,65 @@ proc fileDiff*(client: AgentClient; session: AgentSession; path: string;
     raw: node)
 
 proc sessionInfo*(client: AgentClient; session: AgentSession): AgentSessionInfo =
-  let node = parseJson(client.harborGet("/api/v1/sessions/" & session.id & "/info").body)
+  let rawNode = parseJson(client.harborGet("/api/v1/sessions/" & session.id & "/info").body)
+  let node =
+    if rawNode.kind == JString:
+      parseJson(rawNode.getStr())
+    else:
+      rawNode
   result = AgentSessionInfo(
-    id: node{"id"}.getStr(session.id),
-    status: node{"status"}.getStr(""),
-    eventsUrl: node{"endpoints"}{"events"}.getStr(""),
-    leader: node{"fleet"}{"leader"}.getStr(""),
-    workspacePath: node{"workspacePath"}.getStr(node{"workspace"}{
-        "path"}.getStr("")),
+    id:
+    if node.kind == JObject: node{"id"}.getStr(session.id)
+      else: session.id,
+    status:
+    if node.kind == JObject: node{"status"}.getStr("")
+      else: "",
+    eventsUrl:
+    if node.kind == JObject: node{"endpoints"}{"events"}.getStr("")
+      else: "",
+    leader:
+    if node.kind == JObject: node{"fleet"}{"leader"}.getStr("")
+      else: "",
+    workspacePath:
+    if node.kind == JObject:
+        node{"workspacePath"}.getStr(node{"workspace_path"}.getStr(
+          node{"workspace"}{"path"}.getStr(node{"workspace"}{"workspacePath"}.getStr(""))))
+      else: "",
+    workingCopyMode:
+    if node.kind == JObject:
+        node{"workingCopyMode"}.getStr(node{"working_copy_mode"}.getStr(
+          node{"workspace"}{"workingCopyMode"}.getStr(
+            node{"workspace"}{"working_copy_mode"}.getStr(""))))
+      else: "",
     raw: node)
 
 proc milestoneProgress*(client: AgentClient;
     session: AgentSession): AgentMilestoneProgress =
   let taskId = if session.taskId.len > 0: session.taskId else: session.id
-  let node = parseJson(client.harborGet("/api/v1/tasks/" & taskId &
+  let rawNode = parseJson(client.harborGet("/api/v1/tasks/" & taskId &
       "/milestones").body)
+  let node =
+    if rawNode.kind == JString:
+      parseJson(rawNode.getStr())
+    else:
+      rawNode
   result = AgentMilestoneProgress(
-    taskId: node{"taskId"}.getStr(node{"task_id"}.getStr(taskId)),
-    pendingFeedbackCount: node{"pendingFeedback"}.len,
+    taskId:
+    if node.kind == JObject: node{"taskId"}.getStr(node{"task_id"}.getStr(taskId))
+      else: taskId,
+    pendingFeedbackCount:
+    if node.kind == JObject and not node{"pendingFeedback"}.isNil:
+        node{"pendingFeedback"}.len
+      else: 0,
     raw: node)
-  for item in node{"files"}.items:
+  let filesNode =
+    if node.kind == JArray:
+      node
+    elif node.kind == JObject and node.hasKey("files") and not node["files"].isNil:
+      node["files"]
+    else:
+      newJArray()
+  for item in filesNode.items:
     let summary = item{"summary"}
     result.files.add AgentMilestoneFile(
       path: item{"path"}.getStr(""),

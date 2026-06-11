@@ -76,13 +76,16 @@ suite "nim-agents":
     check node["projectId"].getStr() == "project-a"
     check node["repo"]["mode"].getStr() == "git"
     check node["labels"]["cwd"].getStr() == "/work/repo"
-    check node["prompt"][0]["type"].getStr() == "text"
-    check node["agents"][0]["agent"]["software"].getStr() == "acp"
-    check node["agents"][0]["model"].getStr() == "mock-agent"
-    check node["agents"][0]["displayName"].getStr() == "Scenario ACP"
+    check node["prompt"].getStr() == "wire Harbor"
+    check node["agents"][0]["type"].getStr() == "acp"
+    check node["agents"][0]["settings"]["model"].getStr() == "mock-agent"
+    check node["agents"][0]["display_name"].getStr() == "Scenario ACP"
     check node["agents"][0]["settings"]["temperature"].getInt() == 0
     check node["agents"][0]["acpStdioLaunchCommand"]["binary"].getStr() == "mock-agent"
     check node["agents"][0]["acpStdioLaunchCommand"]["args"][0].getStr() == "--scenario"
+    check node["sandbox"]["mode"].getStr() == "dynamic"
+    check node["sandbox"]["debug"].getBool()
+    check not node["sandbox"].hasKey("tmpfs-size")
 
   test "agent_client_harbor_sse_translates_typed_shared_events":
     var agents = fromHarbor(newHarborClient("http://localhost:18080",
@@ -148,21 +151,27 @@ suite "nim-agents":
     let body = parseJson(requests[0].body)
     check body["tenantId"].getStr() == "tenant-ct"
     check body["projectId"].getStr() == "project-ct"
-    check body["workspace"]["workingCopyMode"].getStr() == "git_worktree"
+    check body["workspace_path"].getStr() == "/repo"
+    check body["working_copy_mode"].getStr() == "git_worktree"
     check body["repo"]["mode"].getStr() == "git"
     check body["repo"]["branch"].getStr() == "feature/agentic"
     check body["labels"]["cwd"].getStr() == "/repo"
     check body["labels"]["consumer"].getStr() == "codetracer"
     check body["labels"]["trace"].getStr() == "deepreview"
-    check body["prompt"].len == 3
-    check body["prompt"][2]["text"].getStr().contains("ct agent-session record")
-    check body["agents"][0]["agent"]["software"].getStr() == "acp"
-    check body["agents"][0]["agent"]["version"].getStr() == "2026-06"
-    check body["agents"][0]["model"].getStr() == "gpt-test"
-    check body["agents"][0]["displayName"].getStr() == "Codex ACP"
+    check body["prompt"].getStr().contains(
+      "Implement the CodeTracer tab workflow.")
+    check body["prompt"].getStr().contains("Workspace must stay isolated.")
+    check body["prompt"].getStr().contains("ct agent-session record")
+    check body["agents"][0]["type"].getStr() == "acp"
+    check body["agents"][0]["version"].getStr() == "2026-06"
+    check body["agents"][0]["settings"]["model"].getStr() == "gpt-test"
+    check body["agents"][0]["display_name"].getStr() == "Codex ACP"
     check body["agents"][0]["settings"]["effort"].getStr() == "medium"
     check body["agents"][0]["acpStdioLaunchCommand"]["binary"].getStr() == "codex"
     check body["agents"][0]["acpStdioLaunchCommand"]["args"][0].getStr() == "--acp"
+    check body["sandbox"]["mode"].getStr() == "dynamic"
+    check body["sandbox"]["debug"].getBool()
+    check not body["sandbox"].hasKey("tmpfs-size")
 
   test "test_nim_agents_codetracer_event_normalization_matrix":
     let acpTurn = promptTurn(@[
@@ -207,7 +216,7 @@ suite "nim-agents":
           "event: message\n" &
           "data: {\"type\":\"milestone_progress\",\"completed\":2,\"total\":5}\n\n" &
           "event: message\n" &
-          "data: {\"type\":\"workspace\",\"status\":\"ready\",\"mountPath\":\"/tmp/harbor-worktree\",\"workingCopyMode\":\"git_worktree\"}\n\n" &
+          "data: {\"type\":\"workspace_ready\",\"workspace_path\":\"/tmp/harbor-worktree\",\"working_copy_mode\":\"git_worktree\"}\n\n" &
           "event: message\n" &
           "data: {\"type\":\"status\",\"status\":\"completed\"}\n\n" &
           "event: message\n" &
@@ -270,6 +279,13 @@ suite "nim-agents":
           "page": 1,
           "perPage": 50
         }))
+      if req.httpMethod == hmGet and req.url.endsWith("/api/v1/sessions/session-wrapped/files"):
+        return HttpResponse(status: 200, body: $(%(
+          "{\"items\":[{\"path\":\"src/wrapped.nim\",\"status\":\"modified\"}],\"total\":1}")))
+      if req.httpMethod == hmGet and req.url.endsWith("/api/v1/sessions/session-array/files"):
+        return HttpResponse(status: 200, body: $(%*[
+          {"path": "src/array.nim", "status": "modified"}
+        ]))
       if req.httpMethod == hmGet and req.url.endsWith("/api/v1/sessions/session-rest/files/content/src/app.nim"):
         return HttpResponse(
           status: 200,
@@ -306,14 +322,38 @@ suite "nim-agents":
         }],
           "pendingFeedback": []
         }))
+      if req.httpMethod == hmGet and req.url.endsWith("/api/v1/tasks/task-wrapped/milestones"):
+        return HttpResponse(status: 200, body: $(%($(%*{
+          "task_id": "task-wrapped",
+          "files": [{
+            "path": "Wrapped.milestones.org",
+            "summary": {
+              "totalMilestones": 1,
+              "completedMilestones": 1
+            }
+          }]
+        }))))
+      if req.httpMethod == hmGet and req.url.endsWith("/api/v1/tasks/task-empty/milestones"):
+        return HttpResponse(status: 200, body: $(%*{
+          "task_id": "task-empty",
+          "pendingFeedback": nil
+        }))
       if req.httpMethod == hmGet and req.url.endsWith("/api/v1/sessions/session-rest/info"):
         return HttpResponse(status: 200, body: $(%*{
           "id": "session-rest",
           "status": "running",
           "fleet": {"leader": "local", "followers": []},
           "endpoints": {"events": "/api/v1/sessions/session-rest/events"},
-          "workspacePath": "/tmp/agent-worktree"
+          "workspacePath": "/tmp/agent-worktree",
+          "workingCopyMode": "git_worktree"
         }))
+      if req.httpMethod == hmGet and req.url.endsWith("/api/v1/sessions/session-info-wrapped/info"):
+        return HttpResponse(status: 200, body: $(%($(%*{
+          "id": "session-info-wrapped",
+          "status": "running",
+          "workspace_path": "/tmp/wrapped-agent-worktree",
+          "working_copy_mode": "git_worktree"
+        }))))
       if req.httpMethod == hmGet and req.url.endsWith("/api/v1/sessions/session-rest/events/history?limit=10"):
         return HttpResponse(status: 200, body: $(%*{
           "events": [
@@ -339,6 +379,16 @@ suite "nim-agents":
     check files.items[1].binary
     check files.items[1].contentType == "application/octet-stream"
 
+    let wrappedFiles = client.changedFiles(AgentSession(id: "session-wrapped",
+        taskId: "task-rest", backend: abkHarbor))
+    check wrappedFiles.total == 1
+    check wrappedFiles.items[0].path == "src/wrapped.nim"
+
+    let arrayFiles = client.changedFiles(AgentSession(id: "session-array",
+        taskId: "task-rest", backend: abkHarbor))
+    check arrayFiles.total == 1
+    check arrayFiles.items[0].path == "src/array.nim"
+
     let content = client.fileContent(session, "src/app.nim")
     check content.content == "echo 1\n"
     check content.contentType == "text/plain; charset=utf-8"
@@ -354,10 +404,28 @@ suite "nim-agents":
     check milestones.files[0].currentMilestone == "M2"
     check milestones.files[0].completedMilestones == 2
 
+    let wrappedMilestones = client.milestoneProgress(AgentSession(
+        id: "session-wrapped", taskId: "task-wrapped", backend: abkHarbor))
+    check wrappedMilestones.taskId == "task-wrapped"
+    check wrappedMilestones.files[0].completedMilestones == 1
+
+    let emptyMilestones = client.milestoneProgress(AgentSession(
+        id: "session-empty", taskId: "task-empty", backend: abkHarbor))
+    check emptyMilestones.taskId == "task-empty"
+    check emptyMilestones.pendingFeedbackCount == 0
+    check emptyMilestones.files.len == 0
+
     let info = client.sessionInfo(session)
     check info.id == "session-rest"
     check info.workspacePath == "/tmp/agent-worktree"
+    check info.workingCopyMode == "git_worktree"
     check info.eventsUrl.endsWith("/events")
+
+    let wrappedInfo = client.sessionInfo(AgentSession(
+        id: "session-info-wrapped", taskId: "task-rest", backend: abkHarbor))
+    check wrappedInfo.id == "session-info-wrapped"
+    check wrappedInfo.workspacePath == "/tmp/wrapped-agent-worktree"
+    check wrappedInfo.workingCopyMode == "git_worktree"
 
     let history = client.eventHistory(session, limit = 10)
     check history.len == 1
