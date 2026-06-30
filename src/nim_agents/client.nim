@@ -172,6 +172,21 @@ type
 proc fromAcp*(client: AcpClient): AgentClient =
   AgentClient(backend: abkAcp, acp: client)
 
+proc shutdown*(client: var AgentClient) {.gcsafe.} =
+  ## Release any resources the agent client holds.  For
+  ## :const:`abkAcp` clients this terminates the underlying ACP
+  ## transport (including any spawned stdio child process).  Idempotent
+  ## and safe to call on partially-initialised clients; harbor clients
+  ## currently have no analogous resource to release, so the call is a
+  ## no-op there.
+  case client.backend
+  of abkAcp:
+    if client.acp.shutdown != nil:
+      client.acp.shutdown()
+      client.acp.shutdown = nil
+  of abkHarbor:
+    discard
+
 proc fromHarbor*(client: HarborClient): AgentClient =
   AgentClient(backend: abkHarbor, harbor: client)
 
