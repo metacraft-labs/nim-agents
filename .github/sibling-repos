@@ -1,3 +1,5 @@
-nim-everywhere
+# Cross-repo siblings cloned by setup-dev-env at workspace-lock-pinned
+# revisions (see codetracer-specs/Testing/Cross-Repo-CI-Integration.md).
 nim-acp
 nim-agent-harbor
+nim-everywhere
