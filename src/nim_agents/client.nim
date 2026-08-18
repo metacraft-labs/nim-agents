@@ -168,6 +168,38 @@ type
     backend*: AgentBackendKind
     acp*: AcpClient
     harbor*: HarborClient
+  AgentSessionLoadState* = enum
+    ## Outcome of :proc:`loadSession`.
+    ##
+    ## The three states are kept apart because a consumer has to *say*
+    ## which one happened.  "The agent holds this session and it is
+    ## empty" and "this session could not be fetched" render as the same
+    ## blank panel unless the difference survives the call, and a blank
+    ## panel reads as "the agent did nothing" — a statement neither
+    ## failure supports.
+    aslsLoaded = "loaded"
+      ## The backend answered and the transcript below is what it holds.
+      ## Zero events is a legitimate ``aslsLoaded``: the session exists
+      ## and carries nothing.
+    aslsUnsupported = "unsupported"
+      ## The backend cannot replay sessions *at all* — an ACP agent that
+      ## does not advertise ``loadSession``.  No session on this agent
+      ## will load, so retrying another id is pointless.
+    aslsUnavailable = "unavailable"
+      ## The backend could have replayed a session but not *this* one:
+      ## pruned, unknown, belonging to another workspace, or unreachable.
+      ## :field:`AgentSessionLoad.message` carries the backend's own
+      ## words, which are the only thing that can explain which.
+  AgentSessionLoad* = object
+    ## What :proc:`loadSession` returned, backend-agnostic.
+    session*: AgentSession
+    state*: AgentSessionLoadState
+    message*: string
+      ## The backend's diagnostic for a non-``aslsLoaded`` state, and the
+      ## empty string otherwise.  Never invented here: it is the agent's
+      ## or Harbor's own message, so a user reading it is reading the
+      ## system that actually refused.
+    events*: seq[AgentEvent]
 
 proc fromAcp*(client: AcpClient): AgentClient =
   AgentClient(backend: abkAcp, acp: client)
@@ -669,6 +701,215 @@ proc readAgentEvents*(client: var AgentClient; session: AgentSession): seq[Agent
   of abkHarbor:
     result = harborEventsToAgentEvents(session.id,
       client.harbor.readSessionEvents(session.id))
+
+# --------------------------------------------------------------------------- #
+#  Loading an *existing* session (RV-6).
+#
+#  ``startSession`` + ``readAgentEvents`` cover a session this process
+#  started.  ``loadSession`` covers the other case: a session that ran
+#  earlier, possibly in another process, which something now holds a
+#  reference to — a CodeTracer review dataset naming the agent run that
+#  produced it, say.  The two backends get there very differently:
+#
+#    * ACP    — the protocol's optional ``session/load``, which must be
+#               capability-checked before it is issued;
+#    * Harbor — ``readSessionEvents(sessionId)``, which has always been
+#               able to read any session by id.
+#
+#  Callers see neither difference.
+# --------------------------------------------------------------------------- #
+
+proc parseAgentSessionLoadState*(value: string): AgentSessionLoadState =
+  ## Inverse of ``$`` for :type:`AgentSessionLoadState`.
+  ##
+  ## An unrecognised spelling resolves to :const:`aslsUnavailable` rather
+  ## than to :const:`aslsLoaded`, because the failure mode of guessing
+  ## wrong in the other direction is a panel that silently claims an
+  ## empty conversation.
+  case value
+  of "loaded": aslsLoaded
+  of "unsupported": aslsUnsupported
+  else: aslsUnavailable
+
+proc agentBackendName*(backend: AgentBackendKind): string =
+  ## Wire spelling of a backend, for the JSON forms below.
+  case backend
+  of abkAcp: "acp"
+  of abkHarbor: "harbor"
+
+proc parseAgentBackendKind*(value: string): AgentBackendKind =
+  if value == "harbor": abkHarbor else: abkAcp
+
+proc parseAgentEventKind*(value: string): AgentEventKind =
+  ## Inverse of ``$`` for :type:`AgentEventKind`; anything unrecognised
+  ## degrades to :const:`aekStatus`, which renders as a neutral line
+  ## rather than as a message the agent never wrote.
+  for kind in AgentEventKind:
+    if $kind == value:
+      return kind
+  aekStatus
+
+proc parseAgentConnectionState*(value: string): AgentConnectionState =
+  for state in AgentConnectionState:
+    if $state == value:
+      return state
+  acsDisconnected
+
+proc toJson*(event: AgentEvent): JsonNode =
+  ## Project one event into the transport form used when a resolved
+  ## session crosses a process boundary (``ct`` resolves it; the
+  ## renderer paints it).
+  ##
+  ## Only the fields a conversation view renders are carried; ``raw`` is
+  ## deliberately dropped, because it is the backend's own frame and can
+  ## contain arbitrary session content that has no business being copied
+  ## into a file.  :proc:`agentEventFromJson` is its exact inverse over
+  ## the fields that are carried.
+  result = %*{
+    "sessionId": event.sessionId,
+    "kind": $event.kind,
+    "state": $event.state,
+    "text": event.text,
+    "status": event.status,
+    "toolCallId": event.toolCallId,
+    "toolName": event.toolName,
+    "filePath": event.filePath,
+    "line": event.line,
+    "linesAdded": event.linesAdded,
+    "linesRemoved": event.linesRemoved,
+    "diff": event.diff,
+    "reviewSeverity": event.reviewSeverity,
+    "reviewCategory": event.reviewCategory,
+    "milestoneCompleted": event.milestoneCompleted,
+    "milestoneTotal": event.milestoneTotal,
+    "workspacePath": event.workspacePath,
+    "workingCopyMode": event.workingCopyMode
+  }
+  var entries = newJArray()
+  for entry in event.planEntries:
+    entries.add %entry
+  result["planEntries"] = entries
+
+proc agentEventFromJson*(node: JsonNode): AgentEvent =
+  result = AgentEvent(
+    sessionId: node{"sessionId"}.getStr(""),
+    kind: parseAgentEventKind(node{"kind"}.getStr("status")),
+    state: parseAgentConnectionState(node{"state"}.getStr("disconnected")),
+    text: node{"text"}.getStr(""),
+    status: node{"status"}.getStr(""),
+    toolCallId: node{"toolCallId"}.getStr(""),
+    toolName: node{"toolName"}.getStr(""),
+    filePath: node{"filePath"}.getStr(""),
+    line: node{"line"}.getInt(0),
+    linesAdded: node{"linesAdded"}.getInt(0),
+    linesRemoved: node{"linesRemoved"}.getInt(0),
+    diff: node{"diff"}.getStr(""),
+    reviewSeverity: node{"reviewSeverity"}.getStr(""),
+    reviewCategory: node{"reviewCategory"}.getStr(""),
+    milestoneCompleted: node{"milestoneCompleted"}.getInt(0),
+    milestoneTotal: node{"milestoneTotal"}.getInt(0),
+    workspacePath: node{"workspacePath"}.getStr(""),
+    workingCopyMode: node{"workingCopyMode"}.getStr(""),
+    raw: node)
+  for entry in node{"planEntries"}.items:
+    result.planEntries.add entry.getStr("")
+
+proc toJson*(load: AgentSessionLoad): JsonNode =
+  ## Serialise a resolved session for hand-off to another process.
+  ##
+  ## The *state* travels with the transcript on purpose: a consumer that
+  ## received only events could not tell an empty session from a failed
+  ## fetch, which is precisely the distinction :type:`AgentSessionLoadState`
+  ## exists to preserve.
+  result = %*{
+    "state": $load.state,
+    "sessionId": load.session.id,
+    "taskId": load.session.taskId,
+    "backend": agentBackendName(load.session.backend),
+    "message": load.message
+  }
+  var events = newJArray()
+  for event in load.events:
+    events.add event.toJson()
+  result["events"] = events
+
+proc agentSessionLoadFromJson*(node: JsonNode): AgentSessionLoad =
+  result = AgentSessionLoad(
+    session: AgentSession(
+      id: node{"sessionId"}.getStr(""),
+      taskId: node{"taskId"}.getStr(""),
+      backend: parseAgentBackendKind(node{"backend"}.getStr("acp"))),
+    state: parseAgentSessionLoadState(node{"state"}.getStr("unavailable")),
+    message: node{"message"}.getStr(""))
+  for entry in node{"events"}.items:
+    result.events.add agentEventFromJson(entry)
+
+proc loadSession*(client: var AgentClient; sessionId: string; cwd = "";
+    mcpServers: seq[string] = @[]; taskId = ""): AgentSessionLoad =
+  ## Re-open the session `sessionId` on whichever backend this client
+  ## speaks, and return its whole conversation.
+  ##
+  ## One API, backend-agnostic to callers: ACP goes through the
+  ## protocol's ``session/load`` (negotiating the ``initialize``
+  ## handshake first if the caller has not, since the capability check
+  ## needs its answer), Harbor through the REST events endpoint it has
+  ## always had.  Both produce :type:`AgentEvent` values — the same type
+  ## :proc:`readAgentEvents` yields for a *live* session — so a consumer
+  ## renders a finished session and a running one with one code path.
+  ##
+  ## *Failures are returned, not raised.*  A reference that will not
+  ## resolve is an ordinary, expected outcome (the session was pruned;
+  ## the agent cannot replay sessions; the workspace is elsewhere) and it
+  ## has to be *shown* rather than logged.  Making it a state on the
+  ## result means a caller cannot accidentally swallow it in a `try`
+  ## around unrelated work and end up painting an empty conversation,
+  ## which reads as "the agent did nothing".  Programming errors — a
+  ## malformed URL, a transport that was never wired — still propagate.
+  ##
+  ## ``cwd`` and ``mcpServers`` are ACP's workspace context: an agent
+  ## resolves a session against the directory it ran in, so passing the
+  ## review's workspace is what stops a session being replayed against
+  ## the wrong tree.  Harbor ignores them; it addresses sessions by id
+  ## alone.
+  result = AgentSessionLoad(
+    session: AgentSession(id: sessionId, taskId: taskId,
+                          backend: client.backend),
+    state: aslsUnavailable)
+  case client.backend
+  of abkAcp:
+    if not client.acp.capabilitiesNegotiated:
+      # ACP requires ``initialize`` before any other method and the
+      # capability check needs its answer.  A caller that only wants to
+      # read a finished session should not have to know that, so the
+      # handshake happens here.
+      try:
+        discard client.acp.initialize(InitializeRequest(
+          protocolVersion: 1,
+          clientInfo: ClientInfo(name: "nim-agents", version: "0.1.0"),
+          clientCapabilities: ClientCapabilities(streaming: true)))
+      except AcpError as e:
+        result.message = e.msg
+        return
+    try:
+      let loaded = client.acp.loadSession(LoadSessionRequest(
+        sessionId: sessionId, cwd: cwd, mcpServers: mcpServers))
+      result.state = aslsLoaded
+      result.session.id = loaded.sessionId
+      result.events = acpUpdatesToAgentEvents(loaded.sessionId, loaded.updates)
+    except AcpSessionLoadUnsupportedError as e:
+      # The agent cannot replay sessions at all — a different fact from
+      # "this session is gone", and the caller is told which.
+      result.state = aslsUnsupported
+      result.message = e.msg
+    except AcpError as e:
+      result.message = e.msg
+  of abkHarbor:
+    try:
+      result.events = harborEventsToAgentEvents(sessionId,
+        client.harbor.readSessionEvents(sessionId))
+      result.state = aslsLoaded
+    except HarborError as e:
+      result.message = e.msg
 
 proc startSession*(client: var AgentClient; cwd: string;
     prompt: seq[ContentBlock] = @[]): AgentSession =

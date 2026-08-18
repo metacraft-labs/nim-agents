@@ -8,6 +8,7 @@ build: build-native build-js
 build-native:
     nim c {{paths}} tests/test_agents.nim
     nim c {{paths}} tests/test_consumers.nim
+    nim c {{paths}} tests/test_session_load_client.nim
     nim c {{paths}} tests/test_native_stdio_acp_transport.nim
     nim c {{paths}} tests/test_codex_acp_smoke.nim
     nim c {{paths}} tests/test_inject_prompt_client.nim
@@ -15,12 +16,14 @@ build-native:
 build-js:
     nim js {{paths}} tests/test_agents.nim
     nim js {{paths}} tests/test_consumers.nim
+    nim js {{paths}} tests/test_session_load_client.nim
 
 test: test-native test-js
 
 test-native:
     nim c -r {{paths}} tests/test_agents.nim
     nim c -r {{paths}} tests/test_consumers.nim
+    nim c -r {{paths}} tests/test_session_load_client.nim
     nim c -r {{paths}} tests/test_native_stdio_acp_transport.nim
     nim c -r {{paths}} tests/test_codex_acp_smoke.nim
     nim c -r {{paths}} tests/test_inject_prompt_client.nim
@@ -28,12 +31,14 @@ test-native:
 test-js:
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_agents.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_consumers.nim
+    bash tools/nim-js-test-gate.sh {{paths}} tests/test_session_load_client.nim
 
 lint: lint-nim lint-nix
 
 lint-nim:
     nim check {{paths}} tests/test_agents.nim
     nim check {{paths}} tests/test_consumers.nim
+    nim check {{paths}} tests/test_session_load_client.nim
     nim check {{paths}} tests/test_native_stdio_acp_transport.nim
     nim check {{paths}} tests/test_codex_acp_smoke.nim
     nim check {{paths}} tests/test_inject_prompt_client.nim
