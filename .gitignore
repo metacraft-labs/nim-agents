@@ -5,3 +5,6 @@ tests/test_*
 !tests/*.nim
 *.js
 result
+
+# Repro development environment cache
+.repro/
