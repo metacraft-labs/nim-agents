@@ -6,6 +6,7 @@ paths := "--path:src --path:../nim-everywhere/src --path:../nim-acp/src --path:.
 build: build-native build-js
 
 build-native:
+    nim c {{paths}} tests/test_acp_launch_prefix.nim
     nim c {{paths}} tests/test_agents.nim
     nim c {{paths}} tests/test_consumers.nim
     nim c {{paths}} tests/test_session_load_client.nim
@@ -22,6 +23,7 @@ build-js:
 test: test-native test-js
 
 test-native:
+    nim c -r {{paths}} tests/test_acp_launch_prefix.nim
     nim c -r {{paths}} tests/test_harbor_lifecycle_threads.nim
     nim c -r {{paths}} tests/test_harbor_rest_native.nim
     nim c -r {{paths}} tests/test_agents.nim
@@ -40,6 +42,7 @@ test-js:
 lint: lint-nim lint-nix
 
 lint-nim:
+    nim check {{paths}} tests/test_acp_launch_prefix.nim
     nim check {{paths}} tests/test_agents.nim
     nim check {{paths}} tests/test_consumers.nim
     nim check {{paths}} tests/test_session_load_client.nim

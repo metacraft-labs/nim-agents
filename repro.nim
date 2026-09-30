@@ -134,6 +134,8 @@ const agentsTestSpecs: seq[AgentsTestSpec] = @[
   AgentsTestSpec(source: "tests/test_harbor_rest_native.nim",
     binary: "build/test-bin/test_harbor_rest_native", serial: true),
   # Pure-API unittest suites — no OS gate, no subprocess; parallel-safe.
+  AgentsTestSpec(source: "tests/test_acp_launch_prefix.nim",
+    binary: "build/test-bin/test_acp_launch_prefix", serial: true),
   AgentsTestSpec(source: "tests/test_agents.nim",
     binary: "build/test-bin/test_agents", serial: false),
   AgentsTestSpec(source: "tests/test_consumers.nim",
