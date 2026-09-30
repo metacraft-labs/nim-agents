@@ -696,7 +696,12 @@ proc harborEventToAgentEvent*(sessionId: string;
       result.text = "Harbor session " & sessionId & " failed"
   else:
     let rawType = event.raw{"type"}.getStr("")
-    if rawType == "error":
+    if rawType == "user_input":
+      # Harbor's typed input is human activity, never assistant output. Keep
+      # its original content/raw envelope without guessing from message text.
+      result.kind = aekStatus
+      result.text = event.raw{"content"}.getStr("")
+    elif rawType == "error":
       result.kind = aekError
       result.text = event.message
       result.stopReason = srError

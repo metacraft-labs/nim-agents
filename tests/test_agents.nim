@@ -33,6 +33,27 @@ proc harborSseTransport(): HttpTransport =
     HttpResponse(status: 404, body: "not found")
 
 suite "nim-agents":
+  test "typed Harbor user input preserves raw content without becoming assistant output":
+    let raw = %* {"type": "user_input", "content": "user: exact prompt",
+      "input_type": "text", "user_name": "user", "timestamp": 123}
+    let mapped = harborEventToAgentEvent("session", eventFromJson(raw))
+    check mapped.kind == aekStatus
+    check mapped.status == ""
+    check mapped.raw{"type"}.getStr() == "user_input"
+    check mapped.text == "user: exact prompt"
+    check mapped.raw == raw
+    check mapped.sessionId == "session"
+
+  test "assistant logs keep user prefixes and exact submitted text":
+    # Text cannot establish authorship: an assistant may quote the user's
+    # entire input, including the legacy Harbor log prefix, verbatim.
+    for text in ["user: exact prompt", "exact prompt", "user: legitimate assistant explanation"]:
+      let raw = %* {"type": "log", "message": text, "level": "info", "timestamp": 124}
+      let mapped = harborEventToAgentEvent("session", eventFromJson(raw))
+      check mapped.kind == aekMessageChunk
+      check mapped.text == text
+      check mapped.raw == raw
+
   test "persistent idle ends only the turn and process completion is an error":
     for status in ["paused", "completed"]:
       let transport: HttpTransport = proc(req: HttpRequest): HttpResponse =
