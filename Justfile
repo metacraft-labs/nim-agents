@@ -22,6 +22,8 @@ build-js:
 test: test-native test-js
 
 test-native:
+    nim c -r {{paths}} tests/test_harbor_lifecycle_threads.nim
+    nim c -r {{paths}} tests/test_harbor_rest_native.nim
     nim c -r {{paths}} tests/test_agents.nim
     nim c -r {{paths}} tests/test_consumers.nim
     nim c -r {{paths}} tests/test_session_load_client.nim

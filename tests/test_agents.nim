@@ -1,3 +1,5 @@
+## Fake ACP/HTTP peers here isolate common-library dispatch and wire contracts.
+## Real Harbor/provider process continuity is covered separately by integration tests.
 import unittest
 import std/json
 import std/strutils
@@ -31,6 +33,126 @@ proc harborSseTransport(): HttpTransport =
     HttpResponse(status: 404, body: "not found")
 
 suite "nim-agents":
+  test "persistent idle ends only the turn and process completion is an error":
+    for status in ["paused", "completed"]:
+      let transport: HttpTransport = proc(req: HttpRequest): HttpResponse =
+        HttpResponse(status: 201, body: $(%* {"session_id": "persistent", "status": "queued"}))
+      var harbor = newHarborClient("http://harbor.invalid", transport)
+      let wireStatus = status
+      harbor.streamTransport = proc(req: HttpRequest; callback: HarborStreamCallback) =
+        check callback(eventFromJson(%* {"type": "status", "status": "paused"}), "1")
+        check callback(eventFromJson(%* {"type": "status", "status": "running"}), "2")
+        let keepReading = callback(eventFromJson(%* {"type": "status", "status": wireStatus}), "3")
+        check not keepReading
+      var client = fromHarbor(harbor)
+      let session = client.createSession(AgentStartMode(workspace: defaultWorkspaceContext("/repo"),
+        prompt: @[textBlock("hello")], acpAgent: acpAgentConfig("provider")))
+      let turn = client.streamAgentTurn(session, nil)
+      if status == "paused":
+        check turn.stopReason == srEndTurn
+        check session.runtime.lifecycle == aslReady
+        check session.runtime.turn == atsCompleted
+      else:
+        check turn.stopReason == srError
+        check session.runtime.lifecycle == aslFailed
+        check session.runtime.turn == atsFailed
+
+  test "persistent nonstream waits and completion cannot revive a closed session":
+    for terminal in ["paused", "failed"]:
+      var deliveries = 0
+      var nestedRejected = false
+      var client: AgentClient
+      var session: AgentSession
+      var competing = false
+      let transport: HttpTransport = proc(req: HttpRequest): HttpResponse =
+        if req.url.endsWith("/api/v1/sessions"):
+          return HttpResponse(status: 201, body: "{\"session_id\":\"live\"}")
+        if req.url.contains("/events/history"):
+          if competing:
+            expect HarborError:
+              discard client.sendPrompt(session, @[textBlock("concurrent")])
+            nestedRejected = true
+          return HttpResponse(status: 200, body: "{\"events\":[],\"total_count\":0}")
+        if req.url.endsWith("/prompt"):
+          inc deliveries
+          return HttpResponse(status: 200, body: "{\"accepted\":true}")
+        HttpResponse(status: 200, body: "{}")
+      var harbor = newHarborClient("http://harbor.invalid", transport)
+      var streamCount = 0
+      let finalStatus = terminal
+      harbor.streamTransport = proc(req: HttpRequest; callback: HarborStreamCallback) =
+        inc streamCount
+        discard callback(eventFromJson(%* {"type": "status", "status": "running"}), "1")
+        if competing:
+          client.closeSession(session)
+        discard callback(eventFromJson(%* {"type": "status",
+          "status": (if competing: finalStatus else: "paused")}), "2")
+      client = fromHarbor(harbor)
+      session = client.createSession(AgentStartMode(workspace: defaultWorkspaceContext("/repo"),
+        prompt: @[textBlock("first")], acpAgent: acpAgentConfig("provider")))
+      discard client.streamAgentTurn(session, nil)
+      competing = true
+      let turn = client.sendPrompt(session, @[textBlock("second")])
+      check turn.stopReason == (if terminal == "paused": srEndTurn else: srError)
+      check streamCount == 2
+      check deliveries == 1
+      check nestedRejected
+      check session.runtime.lifecycle == aslClosed
+      check session.runtime.turn == atsIdle
+      expect HarborError:
+        discard client.sendPrompt(session, @[textBlock("after close")])
+      check deliveries == 1
+
+  test "followup preserves textual resource context and rejects unsupported media":
+    var bodies: seq[JsonNode]
+    let transport: HttpTransport = proc(req: HttpRequest): HttpResponse =
+      bodies.add parseJson(req.body)
+      HttpResponse(status: 202, body: $(%* {"sessionId": "live", "accepted": true}))
+    var client = fromHarbor(newHarborClient("http://harbor.invalid", transport))
+    let prompt = @[textBlock("follow up"), ContentBlock(kind: cbResource,
+      uri: "file:///work/Button.nim#L9", mimeType: "text/plain", data: "button source")]
+    discard client.sendPrompt(AgentSession(id: "live", backend: abkHarbor), prompt)
+    check bodies.len == 1
+    check bodies[0]["prompt"].getStr() == harborPromptText(prompt)
+    check bodies[0]["prompt"].getStr().contains("file:///work/Button.nim#L9")
+    check bodies[0]["prompt"].getStr().contains("button source")
+    expect HarborError:
+      discard client.sendPrompt(AgentSession(id: "live", backend: abkHarbor),
+        @[ContentBlock(kind: cbImage, data: "encoded")])
+    check bodies.len == 1
+
+  test "persistent session uses creation API and cancellation never stops process":
+    var requests: seq[HttpRequest]
+    let transport: HttpTransport = proc(req: HttpRequest): HttpResponse =
+      requests.add req
+      if req.url.endsWith("/api/v1/sessions"):
+        return HttpResponse(status: 201, body: $(%*{"session_id": "persistent", "status": "queued"}))
+      HttpResponse(status: 200, body: "{}")
+    var client = fromHarbor(newHarborClient("http://harbor.invalid", transport))
+    var workspace = defaultWorkspaceContext("/repo")
+    workspace.workingCopyMode = "in_place"
+    let session = client.createSession(AgentStartMode(workspace: workspace,
+      prompt: @[textBlock("user text")], acpAgent: acpAgentConfig("provider-acp")))
+    check session.id == "persistent"
+    check session.taskId.len == 0
+    check session.capabilities.persistent
+    check not session.capabilities.cancelTurn
+    check session.capabilities.closeSession
+    check session.runtime.lifecycle == aslReady
+    check session.runtime.turn == atsWorking
+    check requests.len == 1
+    check requests[0].url.endsWith("/api/v1/sessions")
+    let body = parseJson(requests[0].body)
+    check body["output"]["nonInteractive"].getBool() == false
+    check body["prompt"].getStr() == "user text"
+    expect HarborError:
+      client.cancelTurn(session)
+    check requests.len == 1
+    client.closeSession(session)
+    check session.runtime.lifecycle == aslClosed
+    check requests.len == 2
+    check requests[1].url.endsWith("/sessions/persistent/stop")
+
   test "nim_agents_composes_acp_and_harbor_without_hiding_protocols":
     let fakeAcp = newFakeAcpTransport("composed response")
     var acpClient = newAcpClient(fakeAcp)
@@ -54,6 +176,26 @@ suite "nim-agents":
     var rawAcp = agents.acp
     discard rawAcp.startSession(NewSessionRequest(cwd: "/tmp/advanced"))
     check harborAgents.harbor.baseUrl == "http://localhost:18080"
+
+  test "harbor_rest_prompt_preserves_resource_reference_and_text":
+    let request = buildHarborTaskRequest(HarborTaskConfig(
+      prompt: @[textBlock("Update the selected component"),
+        ContentBlock(kind: cbResource, uri: "file:///work/Button.nim#L42",
+          mimeType: "text/plain", data: "button source")]))
+    let prompt = taskToJson(request)["prompt"].getStr()
+    check prompt.contains("Update the selected component")
+    check prompt.contains("file:///work/Button.nim#L42")
+    check prompt.contains("text/plain")
+    check prompt.contains("button source")
+
+  test "harbor_rest_prompt_rejects_unsupported_media":
+    expect HarborError:
+      discard buildHarborTaskRequest(HarborTaskConfig(
+        prompt: @[ContentBlock(kind: cbImage, mimeType: "image/png", data: "binary")]))
+    expect HarborError:
+      discard buildHarborTaskRequest(HarborTaskConfig(
+        prompt: @[ContentBlock(kind: cbResource, uri: "file:///work/binary",
+          mimeType: "application/octet-stream", data: "binary")]))
 
   test "agent_client_harbor_task_request_supports_acp_agent":
     let req = buildHarborTaskRequest(HarborTaskConfig(

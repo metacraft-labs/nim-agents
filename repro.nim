@@ -129,6 +129,10 @@ type
     serial: bool
 
 const agentsTestSpecs: seq[AgentsTestSpec] = @[
+  AgentsTestSpec(source: "tests/test_harbor_lifecycle_threads.nim",
+    binary: "build/test-bin/test_harbor_lifecycle_threads", serial: true),
+  AgentsTestSpec(source: "tests/test_harbor_rest_native.nim",
+    binary: "build/test-bin/test_harbor_rest_native", serial: true),
   # Pure-API unittest suites — no OS gate, no subprocess; parallel-safe.
   AgentsTestSpec(source: "tests/test_agents.nim",
     binary: "build/test-bin/test_agents", serial: false),
@@ -160,6 +164,7 @@ package nim_agents:
     # resolver under ``nix develop``.
     "nim >=2.0"
     "gcc >=12"
+    "python3 >=3.9"
 
     # Sibling Nim-library producers (SC-11 develop-mode from-source
     # consumption). ``src/nim_agents/client.nim`` + ``src/nim_agents.nim`` +
@@ -215,7 +220,8 @@ package nim_agents:
         binary = binary,
         paths = @["src"],
         actionId = "nim_agents.test_build." & stem,
-        extraInputs = @["src", "nim_agents.nimble"])
+        extraInputs = @["src", "nim_agents.nimble", "tests/harbor_lifecycle_peer.py",
+          "tests/harbor_rest_fixture.py"])
       buildActions.add(edge.action)
       # ``registerImplicitName = false`` because the BUILD edge already owns
       # the binary basename as the implicit target name; the explicit

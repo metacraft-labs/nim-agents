@@ -2,7 +2,7 @@ import std/json
 import std/strutils
 import std/uri
 when not defined(js):
-  import std/os
+  import std/[os, atomics, locks]
 import nim_acp
 import nim_agent_harbor
 import nim_everywhere
@@ -18,10 +18,33 @@ type
     aakClaude = "claude"
     aakCodex = "codex"
     aakCustom = "custom"
+  AgentEventCursor* = ref object
+    value*: int
+  AgentSessionLifecycle* = enum
+    aslReady, aslFailed, aslClosing, aslClosed
+  AgentTurnState* = enum
+    atsIdle, atsWorking, atsCompleted, atsFailed
+  AgentSessionRuntime* = ref object
+    delivering: bool
+    when defined(js):
+      lifecycleValue: AgentSessionLifecycle
+      turnValue: AgentTurnState
+    else:
+      stateLock: Lock
+      deliveryFinished: Cond
+      lifecycleValue: Atomic[AgentSessionLifecycle]
+      turnValue: Atomic[AgentTurnState]
+  AgentSessionCapabilities* = object
+    persistent*: bool
+    cancelTurn*: bool
+    closeSession*: bool
   AgentSession* = object
     id*: string
     taskId*: string
     backend*: AgentBackendKind
+    eventCursor*: AgentEventCursor
+    capabilities*: AgentSessionCapabilities
+    runtime*: AgentSessionRuntime
   PromptTurn* = object
     session*: AgentSession
     stopReason*: StopReason
@@ -92,6 +115,7 @@ type
     executionHostId*: string
     workingCopyMode*: string
   HarborAcpAgentConfig* = object
+    software*: string ## Empty keeps the existing external ACP-agent selection.
     model*: string
     version*: string
     displayName*: string
@@ -99,11 +123,13 @@ type
     args*: seq[string]
     settings*: JsonNode
   HarborTaskConfig* = object
+    allowNetwork*: bool
     workspace*: AgentWorkspaceContext
     prompt*: seq[ContentBlock]
     acpAgent*: HarborAcpAgentConfig
     labels*: JsonNode
   AgentStartMode* = object
+    allowNetwork*: bool
     workspace*: AgentWorkspaceContext
     prompt*: seq[ContentBlock]
     acpAgent*: HarborAcpAgentConfig
@@ -203,6 +229,67 @@ type
 
 proc fromAcp*(client: AcpClient): AgentClient =
   AgentClient(backend: abkAcp, acp: client)
+
+proc lifecycle*(state: AgentSessionRuntime): AgentSessionLifecycle =
+  when defined(js): state.lifecycleValue
+  else: state.lifecycleValue.load()
+
+proc `lifecycle=`(state: AgentSessionRuntime; value: AgentSessionLifecycle) =
+  when defined(js): state.lifecycleValue = value
+  else: state.lifecycleValue.store(value)
+
+proc turn*(state: AgentSessionRuntime): AgentTurnState =
+  when defined(js): state.turnValue
+  else: state.turnValue.load()
+
+proc `turn=`(state: AgentSessionRuntime; value: AgentTurnState) =
+  when defined(js): state.turnValue = value
+  else: state.turnValue.store(value)
+
+proc newSessionRuntime(): AgentSessionRuntime =
+  result = AgentSessionRuntime()
+  when not defined(js):
+    initLock(result.stateLock)
+    initCond(result.deliveryFinished)
+  result.lifecycle = aslReady
+  result.turn = atsWorking
+
+template withSessionState(state: AgentSessionRuntime; body: untyped) =
+  when defined(js):
+    body
+  else:
+    withLock state.stateLock:
+      body
+
+proc finishTurn(state: AgentSessionRuntime; reason: StopReason) =
+  if state == nil: return
+  withSessionState(state):
+    if state.lifecycle != aslClosed:
+      state.turn = if reason == srEndTurn: atsCompleted else: atsFailed
+      if reason != srEndTurn and state.lifecycle != aslClosing:
+        state.lifecycle = aslFailed
+
+proc admitTurn(state: AgentSessionRuntime) =
+  if state == nil: return
+  withSessionState(state):
+    if state.lifecycle != aslReady:
+      raise newException(HarborError, "Session is not ready for another prompt")
+    if state.turn == atsWorking:
+      raise newException(HarborError, "A turn is already running")
+    state.turn = atsWorking
+
+proc beginDelivery(state: AgentSessionRuntime) =
+  if state == nil: return
+  withSessionState(state):
+    if state.lifecycle != aslReady:
+      raise newException(HarborError, "Session closed before prompt delivery")
+    state.delivering = true
+
+proc endDelivery(state: AgentSessionRuntime) =
+  if state == nil: return
+  withSessionState(state):
+    state.delivering = false
+    when not defined(js): broadcast(state.deliveryFinished)
 
 proc shutdown*(client: var AgentClient) {.gcsafe.} =
   ## Release any resources the agent client holds.  For
@@ -416,7 +503,7 @@ proc acpAgentConfig*(binary: string; args: seq[string] = @[];
     settings: if settings == nil: newJObject() else: settings)
 
 proc harborAgentConfig*(config: HarborAcpAgentConfig): AgentConfig =
-  result = defaultAgent("acp", config.model)
+  result = defaultAgent(if config.software.len > 0: config.software else: "acp", config.model)
   result.agent.version = if config.version.len >
       0: config.version else: "latest"
   result.displayName = config.displayName
@@ -426,6 +513,26 @@ proc harborAgentConfig*(config: HarborAcpAgentConfig): AgentConfig =
       binary: config.binary,
       args: config.args)
 
+proc harborPromptText*(items: openArray[ContentBlock]): string =
+  var prompt: seq[string]
+  for item in items:
+    case item.kind
+    of cbText:
+      if item.text.len > 0: prompt.add item.text
+    of cbResource:
+      # REST accepts a string; preserve editor source references and textual
+      # resource content instead of dropping context during ACP conversion.
+      if item.data.len > 0 and not (item.mimeType.startsWith("text/") or
+          item.mimeType == "application/json"):
+        raise newException(HarborError, "Harbor REST prompts cannot embed binary resources")
+      var reference = "Resource: " & item.uri
+      if item.mimeType.len > 0: reference.add " (" & item.mimeType & ")"
+      if item.data.len > 0: reference.add "\n" & item.data
+      prompt.add reference
+    else:
+      raise newException(HarborError, "Harbor REST prompts currently support text and textual resource references only")
+  prompt.join("\n\n")
+
 proc buildHarborTaskRequest*(config: HarborTaskConfig): CreateTaskRequest =
   let repoMode =
     if config.workspace.repoMode.len > 0: config.workspace.repoMode
@@ -434,7 +541,7 @@ proc buildHarborTaskRequest*(config: HarborTaskConfig): CreateTaskRequest =
   result = CreateTaskRequest(
     tenantId: config.workspace.tenantId,
     projectId: config.workspace.projectId,
-    prompt: promptText(config.prompt),
+    prompt: harborPromptText(config.prompt),
     repo: RepoConfig(
       mode: repoMode,
       url: config.workspace.repoUrl,
@@ -449,6 +556,7 @@ proc buildHarborTaskRequest*(config: HarborTaskConfig): CreateTaskRequest =
     agents: @[harborAgentConfig(config.acpAgent)],
     output: defaultOutput(),
     labels: if config.labels == nil: newJObject() else: config.labels)
+  result.sandbox.allowNetwork = config.allowNetwork
   if config.workspace.cwd.len > 0:
     result.labels["cwd"] = %config.workspace.cwd
 
@@ -465,7 +573,7 @@ proc harborWorktreeTaskConfig*(cwd: string; prompt: seq[ContentBlock];
 
 proc stopReasonFromStatus(status: string): StopReason =
   case status
-  of "cancelled": srCancelled
+  of "cancelled", "stopped": srCancelled
   of "failed", "error": srError
   else: srEndTurn
 
@@ -562,7 +670,7 @@ proc harborEventToAgentEvent*(sessionId: string;
       else:
         result.kind = aekConnection
         result.state = stateFromStatus(event.status)
-    of "cancelled":
+    of "cancelled", "stopped":
       result.kind = aekCancelled
       result.state = acsCancelled
       result.stopReason = srCancelled
@@ -584,9 +692,23 @@ proc harborEventToAgentEvent*(sessionId: string;
         result.kind = aekStatus
         result.state = acsStreaming
     result.text = event.message
+    if result.kind == aekError and result.text.len == 0:
+      result.text = "Harbor session " & sessionId & " failed"
   else:
     let rawType = event.raw{"type"}.getStr("")
-    if rawType == "plan":
+    if rawType == "error":
+      result.kind = aekError
+      result.text = event.message
+      result.stopReason = srError
+    elif rawType == "turn_complete":
+      let reason = event.raw{"stop_reason"}.getStr("end_turn")
+      if reason == "tool_use":
+        result.kind = aekStatus
+      else:
+        result.kind = aekCompleted
+        result.state = acsCompleted
+        result.stopReason = parseStopReason(reason)
+    elif rawType == "plan":
       result.kind = aekPlan
       result.planEntries = jsonArrayStrings(event.raw, "entries")
     elif rawType == "milestone" or rawType == "milestone_progress":
@@ -605,7 +727,7 @@ proc harborEventToAgentEvent*(sessionId: string;
     else:
       result.kind = aekStatus
       result.text = event.message
-  if result.kind in {aekCancelled, aekCompleted, aekError}:
+  if result.kind in {aekCancelled, aekCompleted, aekError} and event.status.len > 0:
     result.stopReason = stopReasonFromStatus(event.status)
 
 proc harborEventsToAgentEvents*(sessionId: string;
@@ -638,7 +760,7 @@ proc acpUpdateToAgentEvent*(sessionId: string;
       result.kind = aekCompleted
       result.state = acsCompleted
       result.stopReason = srEndTurn
-    of "cancelled":
+    of "cancelled", "stopped":
       result.kind = aekCancelled
       result.state = acsCancelled
       result.stopReason = srCancelled
@@ -771,6 +893,7 @@ proc toJson*(event: AgentEvent): JsonNode =
     "state": $event.state,
     "text": event.text,
     "status": event.status,
+    "stopReason": $event.stopReason,
     "toolCallId": event.toolCallId,
     "toolName": event.toolName,
     "filePath": event.filePath,
@@ -793,6 +916,7 @@ proc toJson*(event: AgentEvent): JsonNode =
 proc agentEventFromJson*(node: JsonNode): AgentEvent =
   result = AgentEvent(
     sessionId: node{"sessionId"}.getStr(""),
+    stopReason: parseStopReason(node{"stopReason"}.getStr("end_turn")),
     kind: parseAgentEventKind(node{"kind"}.getStr("status")),
     state: parseAgentConnectionState(node{"state"}.getStr("disconnected")),
     text: node{"text"}.getStr(""),
@@ -911,6 +1035,66 @@ proc loadSession*(client: var AgentClient; sessionId: string; cwd = "";
     except HarborError as e:
       result.message = e.msg
 
+proc createSession*(client: var AgentClient; config: AgentStartMode): AgentSession =
+  ## A persistent conversation, distinct from the legacy task-launch API.
+  ## Harbor requires a first prompt; callers keep empty conversations as local drafts.
+  if client.backend != abkHarbor:
+    raise newException(AcpError, "createSession currently requires Harbor REST")
+  if config.acpAgent.binary.len == 0:
+    raise newException(HarborError, "Persistent Harbor sessions require an ACP provider launch command")
+  if config.workspace.workingCopyMode notin ["", "in_place"]:
+    raise newException(HarborError, "Persistent sessions require an existing in-place workspace")
+  let task = buildHarborTaskRequest(HarborTaskConfig(
+    workspace: config.workspace, allowNetwork: config.allowNetwork,
+    prompt: config.prompt, acpAgent: config.acpAgent, labels: config.labels))
+  let response = client.harbor.createSession(CreateSessionRequest(
+    prompt: task.prompt, workspacePath: config.workspace.cwd,
+    agent: task.agents[0], output: defaultOutput(), sandbox: task.sandbox,
+    labels: task.labels))
+  AgentSession(id: response.sessionId, backend: abkHarbor,
+    eventCursor: AgentEventCursor(),
+    runtime: newSessionRuntime(),
+    capabilities: AgentSessionCapabilities(
+      persistent: true, cancelTurn: false, closeSession: true))
+
+proc cancelTurn*(client: var AgentClient; session: AgentSession) =
+  ## Stopping the process is never a fallback for cancelling its current turn.
+  case client.backend
+  of abkAcp: client.acp.cancel(session.id)
+  of abkHarbor:
+    raise newException(HarborError, "Harbor REST does not expose process-preserving turn cancellation")
+
+proc closeSession*(client: var AgentClient; session: AgentSession) =
+  case client.backend
+  of abkHarbor:
+    var previous = aslReady
+    if session.runtime != nil:
+      withSessionState(session.runtime):
+        previous = session.runtime.lifecycle
+        if previous == aslClosed: return
+        if previous == aslClosing:
+          raise newException(HarborError, "Session closure is already pending")
+        when defined(js):
+          if session.runtime.delivering:
+            raise newException(HarborError, "Prompt delivery is pending; retry closure after admission")
+        session.runtime.lifecycle = aslClosing
+        when not defined(js):
+          while session.runtime.delivering:
+            wait(session.runtime.deliveryFinished, session.runtime.stateLock)
+    try:
+      client.harbor.stopSession(session.id)
+      if session.runtime != nil:
+        withSessionState(session.runtime):
+          session.runtime.lifecycle = aslClosed
+          session.runtime.turn = atsIdle
+    except CatchableError:
+      if session.runtime != nil:
+        withSessionState(session.runtime):
+          session.runtime.lifecycle = if session.runtime.turn == atsFailed: aslFailed else: previous
+      raise
+  of abkAcp:
+    raise newException(AcpError, "Explicit ACP session closure is not supported")
+
 proc startSession*(client: var AgentClient; cwd: string;
     prompt: seq[ContentBlock] = @[]): AgentSession =
   case client.backend
@@ -924,7 +1108,8 @@ proc startSession*(client: var AgentClient; cwd: string;
       acpAgent: acpAgentConfig(""))))
     let id = if response.sessionIds.len > 0: response.sessionIds[
         0] else: response.taskId
-    AgentSession(id: id, taskId: response.taskId, backend: abkHarbor)
+    AgentSession(id: id, taskId: response.taskId, backend: abkHarbor,
+      eventCursor: AgentEventCursor())
 
 proc startSession*(client: var AgentClient;
     config: AgentStartMode): AgentSession =
@@ -936,12 +1121,17 @@ proc startSession*(client: var AgentClient;
   of abkHarbor:
     let response = client.harbor.createTask(buildHarborTaskRequest(HarborTaskConfig(
       workspace: config.workspace,
+      allowNetwork: config.allowNetwork,
       prompt: config.prompt,
       acpAgent: config.acpAgent,
       labels: config.labels)))
     let id = if response.sessionIds.len > 0: response.sessionIds[
         0] else: response.taskId
-    AgentSession(id: id, taskId: response.taskId, backend: abkHarbor)
+    AgentSession(id: id, taskId: response.taskId, backend: abkHarbor,
+      eventCursor: AgentEventCursor())
+
+proc sendPromptStreaming*(client: var AgentClient; session: AgentSession;
+    prompt: seq[ContentBlock]; onEvent: AgentEventCallback): PromptTurn
 
 proc sendPrompt*(client: var AgentClient; session: AgentSession;
     prompt: seq[ContentBlock]): PromptTurn =
@@ -952,7 +1142,11 @@ proc sendPrompt*(client: var AgentClient; session: AgentSession;
     PromptTurn(session: session, stopReason: response.stopReason,
         updates: client.acp.drainUpdates())
   of abkHarbor:
-    discard client.harbor.sendPrompt(session.id, prompt.toHarborContentBlocks())
+    if session.capabilities.persistent:
+      return client.sendPromptStreaming(session, prompt, nil)
+    let accepted = client.harbor.sendPrompt(session.id, @[harborTextBlock(harborPromptText(prompt))])
+    if not accepted.accepted:
+      raise newException(HarborError, "Harbor rejected the follow-up prompt")
     PromptTurn(session: session, stopReason: srEndTurn, updates: @[])
 
 # --------------------------------------------------------------------------- #
@@ -1019,12 +1213,55 @@ proc peekQueuedInjections*(client: var AgentClient;
     raise newException(AcpError,
       "peekQueuedInjections: injection not supported on Agent Harbor backend yet")
 
+proc cancelSession*(client: var AgentClient; session: AgentSession) =
+  ## Compatibility spelling for turn cancellation; never closes the session.
+  client.cancelTurn(session)
+
+proc streamAgentTurn*(client: var AgentClient; session: AgentSession;
+    onEvent: AgentEventCallback): PromptTurn =
+  ## Consume the initial Harbor task turn, or a submitted follow-up, with a
+  ## durable cursor so the next turn does not replay earlier output.
+  if client.backend != abkHarbor:
+    raise newException(HarborError, "streamAgentTurn requires Harbor")
+  var reason = srError
+  var observedRunning = false
+  let cursor = if session.eventCursor == nil: AgentEventCursor() else: session.eventCursor
+  let callback: HarborStreamCallback = proc(event: HarborEvent; id: string): bool =
+    if id.len > 0:
+      cursor.value = parseInt(id)
+    else:
+      inc cursor.value
+    var mapped = harborEventToAgentEvent(session.id, event)
+    if session.capabilities.persistent and event.kind == hekStatus:
+      if event.status == "running": observedRunning = true
+      if event.status == "paused" and observedRunning:
+        # Harbor ACP defines Paused as idle/repromptable after PromptResponse.
+        mapped.kind = aekCompleted
+        mapped.state = acsCompleted
+        mapped.stopReason = srEndTurn
+      elif event.status == "completed":
+        mapped.kind = aekError
+        mapped.state = acsError
+        mapped.stopReason = srError
+        mapped.text = "Persistent agent process ended unexpectedly"
+    if onEvent != nil: onEvent(mapped)
+    if mapped.kind in {aekCompleted, aekCancelled, aekError}:
+      reason = mapped.stopReason
+      return false
+    true
+  try:
+    client.harbor.streamSessionEvents(session.id, callback, $cursor.value)
+    finishTurn(session.runtime, reason)
+  except CatchableError:
+    finishTurn(session.runtime, srError)
+    raise
+  PromptTurn(session: session, stopReason: reason)
+
 proc sendPromptStreaming*(client: var AgentClient; session: AgentSession;
     prompt: seq[ContentBlock];
     onEvent: AgentEventCallback): PromptTurn =
   ## Streaming variant of :proc:`sendPrompt`. ACP clients receive events as
-  ## transport notifications arrive. Harbor currently falls back to buffered
-  ## polling after the prompt completes.
+  ## transport notifications arrive. Harbor consumes incremental REST SSE.
   case client.backend
   of abkAcp:
     let sessionId = session.id
@@ -1035,16 +1272,27 @@ proc sendPromptStreaming*(client: var AgentClient; session: AgentSession;
         onEvent(acpUpdateToAgentEvent(sessionId, update))
     let response = client.acp.sendPromptStreaming(
       PromptRequest(sessionId: sessionId, prompt: prompt), handler)
-    PromptTurn(session: session, stopReason: response.stopReason,
+    result = PromptTurn(session: session, stopReason: response.stopReason,
         updates: collected)
   of abkHarbor:
-    discard client.harbor.sendPrompt(session.id, prompt.toHarborContentBlocks())
-    let mapped = harborEventsToAgentEvents(session.id,
-      client.harbor.readSessionEvents(session.id))
-    if onEvent != nil:
-      for event in mapped:
-        onEvent(event)
-    PromptTurn(session: session, stopReason: srEndTurn, updates: @[])
+    # Reserve admission before any transport call. Locks never span callbacks or
+    # HTTP, so a callback can close the session without deadlocking its stream.
+    admitTurn(session.runtime)
+    try:
+      let history = client.harbor.readEventHistory(session.id, EventHistoryQuery(limit: 1))
+      if session.eventCursor != nil: session.eventCursor.value = history.totalCount
+      let text = harborPromptText(prompt)
+      beginDelivery(session.runtime)
+      try:
+        let accepted = client.harbor.sendPrompt(session.id, @[harborTextBlock(text)])
+        if not accepted.accepted:
+          raise newException(HarborError, "Harbor rejected the follow-up prompt")
+      finally:
+        endDelivery(session.runtime)
+      result = client.streamAgentTurn(session, onEvent)
+    except CatchableError:
+      finishTurn(session.runtime, srError)
+      raise
 
 proc requireHarbor(client: AgentClient) =
   if client.backend != abkHarbor:
