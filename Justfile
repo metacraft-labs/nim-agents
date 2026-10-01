@@ -23,6 +23,7 @@ build-js:
 test: test-native test-js
 
 test-native:
+    nim c -r {{paths}} tests/test_activity.nim
     nim c -r {{paths}} tests/test_acp_launch_prefix.nim
     nim c -r {{paths}} tests/test_harbor_lifecycle_threads.nim
     nim c -r {{paths}} tests/test_harbor_rest_native.nim
@@ -35,6 +36,7 @@ test-native:
     nim c -r {{paths}} tests/test_nimcache_is_worktree_local.nim
 
 test-js:
+    bash tools/nim-js-test-gate.sh {{paths}} tests/test_activity.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_agents.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_consumers.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_session_load_client.nim

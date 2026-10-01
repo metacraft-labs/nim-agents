@@ -136,6 +136,8 @@ const agentsTestSpecs: seq[AgentsTestSpec] = @[
   # Pure-API unittest suites — no OS gate, no subprocess; parallel-safe.
   AgentsTestSpec(source: "tests/test_acp_launch_prefix.nim",
     binary: "build/test-bin/test_acp_launch_prefix", serial: true),
+  AgentsTestSpec(source: "tests/test_activity.nim",
+    binary: "build/test-bin/test_activity", serial: false),
   AgentsTestSpec(source: "tests/test_agents.nim",
     binary: "build/test-bin/test_agents", serial: false),
   AgentsTestSpec(source: "tests/test_consumers.nim",

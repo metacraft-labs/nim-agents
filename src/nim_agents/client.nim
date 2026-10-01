@@ -82,6 +82,8 @@ type
     aekError = "error"
     aekCancelled = "cancelled"
     aekCompleted = "completed"
+  AgentPresentationField* = object
+    name*, value*: string
   AgentEvent* = object
     sessionId*: string
     kind*: AgentEventKind
@@ -103,6 +105,14 @@ type
     workspacePath*: string
     workingCopyMode*: string
     stopReason*: StopReason
+    presentationFields*: seq[AgentPresentationField]
+    sourceType*: string ## Safe backend event discriminator, never inferred from text.
+    eventId*: string ## Durable stream identity when the backend provides it.
+    toolArguments*: string ## Presentation copy with credential/config fields removed.
+    model*, usageSource*: string
+    inputTokens*, outputTokens*: int
+    hasUsage*: bool
+    question*: string
     raw*: JsonNode
   AgentWorkspaceContext* = object
     tenantId*: string
@@ -616,11 +626,93 @@ proc progressFromRaw(raw: JsonNode): tuple[done: int; total: int] =
     raw{"done"}.getInt(0)))
   result.total = raw{"total"}.getInt(raw{"totalMilestones"}.getInt(0))
 
+proc presentationArguments(node: JsonNode): JsonNode =
+  ## Tool arguments are content, but environment/config/auth values must not cross
+  ## the presentation boundary. Preserve structure while removing these fields.
+  if node == nil: return newJNull()
+  case node.kind
+  of JObject:
+    result = newJObject()
+    for key, value in node.pairs:
+      let name = key.toLowerAscii()
+      if name.contains("token") or name.contains("password") or
+          name.contains("secret") or name.contains("credential") or
+          name in ["env", "environment", "authorization", "headers", "settings", "config"]:
+        result[key] = %"[private]"
+      else: result[key] = presentationArguments(value)
+  of JArray:
+    result = newJArray()
+    for value in node.items: result.add presentationArguments(value)
+  else: result = node
+
 proc harborEventToAgentEvent*(sessionId: string;
     event: HarborEvent): AgentEvent =
   result.sessionId = sessionId
   result.status = event.status
   result.raw = event.raw
+  result.sourceType = event.raw{"type"}.getStr($event.kind)
+  result.eventId = event.raw{"eventId"}.getStr("")
+  # Explicit presentation allowlists for the full SessionEvent REST union.
+  # Credential-account names, auth surfaces, provider configuration and arbitrary
+  # payload/innerEvent objects never enter this projection.
+  let fields = case result.sourceType
+    of "file_read": @["file_path", "start_line", "end_line"]
+    of "diff": @["oldText", "newText", "oldTextHead", "oldTextTail", "newTextHead", "newTextTail", "truncated"]
+    of "turn_complete": @["stop_reason", "input_tokens", "output_tokens"]
+    of "delegation": @["kind", "activeSubAgents", "totalSubAgents"]
+    of "orchestration": @["kind", "targetSessionId"]
+    of "sub_agent": @["subAgentId", "parentSessionId"]
+    of "fleet_fence": @["kind", "fenceId", "durationMs"]
+    of "fleet_host": @["kind", "host", "os", "command", "exitCode", "stream"]
+    of "session_awaiting_input", "agent_question": @["request", "kind"]
+    of "session_resumed": @["deliverer"]
+    of "session_ended": @["outcome"]
+    of "proxy_credential_rotated": @["provider", "triggerStatus"]
+    of "proxy_rate_limit_absorbed": @["attempts", "cumulativeWaitMs"]
+    of "dispatcher_restarted": @["restartSeq"]
+    of "anti_halting_resume_confirmed": @["stallType"]
+    of "session_leadership_migrated": @["sourceExecutor", "targetExecutor", "targetOs", "flushedSeq"]
+    of "participant": @["kind", "display_name", "transition"]
+    of "context_injection": @["tag"]
+    of "login_required": @["provider", "request"]
+    of "context_files": @["kind", "totalCount"]
+    else: newSeq[string]()
+  for key in fields:
+    let value = event.raw{key}
+    if value != nil and value.kind in {JString, JInt, JBool}:
+      result.presentationFields.add AgentPresentationField(name: key,
+        value: if value.kind == JString: value.getStr() else: $value)
+  if result.sourceType == "context_files":
+    let files = event.raw{"files"}
+    if files != nil and files.kind == JArray:
+      for file in files.items:
+        if file{"path"} != nil and file{"path"}.kind == JString:
+          result.presentationFields.add AgentPresentationField(name: "file", value: file{"path"}.getStr())
+  if result.sourceType == "agent_question":
+    let options = event.raw{"options"}
+    if options != nil and options.kind == JArray:
+      for option in options.items:
+        let label = option{"label"}.getStr("")
+        if label.len > 0:
+          result.presentationFields.add AgentPresentationField(name: "option", value: label)
+  if result.sourceType == "plan":
+    let entries = event.raw{"entries"}
+    if entries != nil and entries.kind == JArray:
+      for entry in entries.items:
+        let content = entry{"content"}.getStr("")
+        let status = entry{"status"}.getStr("")
+        if content.len > 0 and status.len > 0:
+          result.presentationFields.add AgentPresentationField(name: content, value: status)
+  if result.sourceType == "link_spans":
+    let spans = event.raw{"spans"}
+    if spans != nil and spans.kind == JArray:
+      for span in spans.items:
+        let targets = span{"targets"}
+        if targets != nil and targets.kind == JArray:
+          for target in targets.items:
+            let path = target{"path"}.getStr("")
+            if path.len > 0:
+              result.presentationFields.add AgentPresentationField(name: "path", value: path)
   case event.kind
   of hekThought:
     result.kind = aekThoughtChunk
@@ -632,6 +724,12 @@ proc harborEventToAgentEvent*(sessionId: string;
     result.kind = aekToolCall
     result.toolCallId = event.toolExecutionId
     result.toolName = event.toolName
+    let args = event.raw{"tool_args"}
+    if args != nil:
+      if args.kind == JString:
+        try: result.toolArguments = $presentationArguments(parseJson(args.getStr()))
+        except JsonParsingError: result.toolArguments = "[unstructured arguments]"
+      else: result.toolArguments = $presentationArguments(args)
     result.status = if event.status.len > 0: event.status else: "started"
   of hekToolResult:
     result.kind = aekToolCallUpdate
@@ -662,11 +760,24 @@ proc harborEventToAgentEvent*(sessionId: string;
   of hekLlmRequest:
     result.kind = aekLlmRequest
     result.status = event.status
-    result.text = event.message
+    result.model = event.raw{"model"}.getStr("")
+    result.text = event.raw{"responseSummary"}.getStr(event.message)
+    let usage = event.raw{"usage"}
+    if usage != nil and usage.kind == JObject:
+      result.inputTokens = usage{"input_tokens"}.getInt(usage{"inputTokens"}.getInt(-1))
+      result.outputTokens = usage{"output_tokens"}.getInt(usage{"outputTokens"}.getInt(-1))
+      result.hasUsage = result.inputTokens >= 0 or result.outputTokens >= 0
+      result.usageSource = usage{"source"}.getStr("")
   of hekSubAgent:
     result.kind = aekSubAgent
     result.status = event.status
     result.text = event.message
+    let inner = event.raw{"innerEvent"}
+    if inner != nil and inner.kind == JObject:
+      # Only the actual inner content discriminator and readable text, never
+      # arbitrary nested configuration. Host navigation still has no fake action.
+      result.presentationFields.add AgentPresentationField(name: "event", value: inner{"type"}.getStr(""))
+      result.text = inner{"message"}.getStr(inner{"thought"}.getStr(event.message))
   of hekWorkspace, hekStatus:
     case event.status
     of "connecting", "authenticating", "connected", "streaming", "ready",
@@ -711,6 +822,18 @@ proc harborEventToAgentEvent*(sessionId: string;
       # its original content/raw envelope without guessing from message text.
       result.kind = aekStatus
       result.text = event.raw{"content"}.getStr("")
+    elif rawType == "agent_question":
+      result.kind = aekStatus
+      result.question = event.raw{"prompt"}.getStr("")
+      result.text = result.question
+    elif rawType in ["file_read", "delegation", "orchestration", "context_files",
+        "fleet_fence", "fleet_host", "session_started", "session_awaiting_input",
+        "session_resumed", "session_ended", "proxy_credential_rotated",
+        "proxy_rate_limit_absorbed", "dispatcher_restarted", "anti_halting_resume_confirmed",
+        "session_leadership_migrated", "participant", "context_injection", "login_required", "link_spans"]:
+      result.kind = aekStatus
+      result.text = event.raw{"description"}.getStr(event.raw{"output"}.getStr(event.message))
+      if rawType == "context_injection": result.text = event.raw{"text"}.getStr("")
     elif rawType == "error":
       result.kind = aekError
       result.text = event.message
@@ -903,6 +1026,15 @@ proc toJson*(event: AgentEvent): JsonNode =
   ## into a file.  :proc:`agentEventFromJson` is its exact inverse over
   ## the fields that are carried.
   result = %*{
+    "sourceType": event.sourceType,
+    "eventId": event.eventId,
+    "toolArguments": event.toolArguments,
+    "model": event.model,
+    "usageSource": event.usageSource,
+    "hasUsage": event.hasUsage,
+    "inputTokens": event.inputTokens,
+    "outputTokens": event.outputTokens,
+    "question": event.question,
     "sessionId": event.sessionId,
     "kind": $event.kind,
     "state": $event.state,
@@ -927,9 +1059,22 @@ proc toJson*(event: AgentEvent): JsonNode =
   for entry in event.planEntries:
     entries.add %entry
   result["planEntries"] = entries
+  var fields = newJArray()
+  for field in event.presentationFields:
+    fields.add %*{"name": field.name, "value": field.value}
+  result["presentationFields"] = fields
 
 proc agentEventFromJson*(node: JsonNode): AgentEvent =
   result = AgentEvent(
+    sourceType: node{"sourceType"}.getStr(""),
+    eventId: node{"eventId"}.getStr(""),
+    toolArguments: node{"toolArguments"}.getStr(""),
+    model: node{"model"}.getStr(""),
+    usageSource: node{"usageSource"}.getStr(""),
+    hasUsage: node{"hasUsage"}.getBool(false),
+    inputTokens: node{"inputTokens"}.getInt(0),
+    outputTokens: node{"outputTokens"}.getInt(0),
+    question: node{"question"}.getStr(""),
     sessionId: node{"sessionId"}.getStr(""),
     stopReason: parseStopReason(node{"stopReason"}.getStr("end_turn")),
     kind: parseAgentEventKind(node{"kind"}.getStr("status")),
@@ -950,8 +1095,22 @@ proc agentEventFromJson*(node: JsonNode): AgentEvent =
     workspacePath: node{"workspacePath"}.getStr(""),
     workingCopyMode: node{"workingCopyMode"}.getStr(""),
     raw: node)
-  for entry in node{"planEntries"}.items:
-    result.planEntries.add entry.getStr("")
+  let fields = node{"presentationFields"}
+  if fields != nil and fields.kind == JArray:
+    for field in fields.items:
+      if field.kind == JObject:
+        result.presentationFields.add AgentPresentationField(
+          name: field{"name"}.getStr(""), value: field{"value"}.getStr(""))
+  let entries = node{"planEntries"}
+  if entries != nil and entries.kind == JArray:
+    for entry in entries.items:
+      if entry.kind == JString: result.planEntries.add entry.getStr("")
+  elif entries != nil:
+    # Malformed recognized payloads are visible diagnostics, never a fabricated
+    # turn-complete signal. The caller still waits for its actual terminal frame.
+    result.kind = aekError
+    result.text = "Malformed agent plan entries"
+    result.stopReason = srError
 
 proc toJson*(load: AgentSessionLoad): JsonNode =
   ## Serialise a resolved session for hand-off to another process.
@@ -1247,6 +1406,7 @@ proc streamAgentTurn*(client: var AgentClient; session: AgentSession;
     else:
       inc cursor.value
     var mapped = harborEventToAgentEvent(session.id, event)
+    if id.len > 0: mapped.eventId = id
     if session.capabilities.persistent and event.kind == hekStatus:
       if event.status == "running": observedRunning = true
       if event.status == "paused" and observedRunning:
