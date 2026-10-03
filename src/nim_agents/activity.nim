@@ -43,7 +43,7 @@ proc appendAssistant*(timeline: var ActivityTimeline; text: string) =
     inc timeline.revision
   else:
     timeline.appendEntry(ActivityEntry(role: arAssistant, kind: aekMessageChunk,
-      text: text))
+      text: text, status: "streaming"))
 
 proc reduce*(timeline: var ActivityTimeline; event: AgentEvent): bool {.discardable.} =
   if event.eventId.len > 0:
@@ -73,6 +73,17 @@ proc reduce*(timeline: var ActivityTimeline; event: AgentEvent): bool {.discarda
     timeline.lastPlainTurn = timeline.turn
     timeline.lastPlainSession = event.sessionId
     timeline.lastPlainStatus = plain
+  # Only genuine terminal events settle streaming prose; heartbeats and tool
+  # phases never imply that the provider has finished the turn.
+  if event.kind in {aekCompleted, aekCancelled, aekError}:
+    for item in timeline.entries.mitems:
+      if item.turn == timeline.turn and item.status == "streaming" and
+          (item.role == arAssistant or item.kind == aekThoughtChunk):
+        item.status = case event.kind
+          of aekCompleted: "completed"
+          of aekCancelled: "stopped"
+          else: "interrupted"
+        inc timeline.revision
   var data = event
   data.raw = nil
   var entry = ActivityEntry(role: arActivity, kind: event.kind, data: data,
@@ -118,6 +129,7 @@ proc reduce*(timeline: var ActivityTimeline; event: AgentEvent): bool {.discarda
         if changed: inc timeline.revision
         return true
   of aekThoughtChunk:
+    entry.status = "streaming"
     if event.text.len == 0: return false
     if timeline.entries.len > 0 and timeline.entries[^1].kind == aekThoughtChunk and
         timeline.entries[^1].turn == timeline.turn:

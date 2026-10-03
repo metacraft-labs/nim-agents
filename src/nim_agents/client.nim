@@ -661,6 +661,8 @@ proc harborEventToAgentEvent*(sessionId: string;
   # Credential-account names, auth surfaces, provider configuration and arbitrary
   # payload/innerEvent objects never enter this projection.
   let fields = case result.sourceType
+    of "llm_request": @["messageCount", "hasToolCalls"]
+    of "tool_result": @["exit_code"]
     of "file_read": @["file_path", "start_line", "end_line"]
     of "diff": @["oldText", "newText", "oldTextHead", "oldTextTail", "newTextHead", "newTextTail", "truncated"]
     of "turn_complete": @["stop_reason", "input_tokens", "output_tokens"]
