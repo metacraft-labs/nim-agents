@@ -751,7 +751,9 @@ proc harborEventToAgentEvent*(sessionId: string;
     result.linesAdded = event.linesAdded
     result.linesRemoved = event.linesRemoved
     result.status = if event.status.len > 0: event.status else: "applied"
-    result.text = event.message
+    # The public file_edit DTO carries readable prose in description, not
+    # message. Project only that typed string; arbitrary raw fields stay private.
+    result.text = event.raw{"description"}.getStr(event.message)
   of hekDiff:
     result.kind = aekDiff
     result.filePath = event.filePath

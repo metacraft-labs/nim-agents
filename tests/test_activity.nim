@@ -4,9 +4,56 @@
 ## merged tool results, streamed content, private-field omission and real metrics.
 import std/[unittest, json, strutils]
 import nim_agents
-import nim_agents/activity
+import nim_agents/[activity, activity_presentation]
 
 suite "Opt-in agent activity":
+  test "file edit description survives safe REST wire and message fallback":
+    for description in [%"Use shared spacing and preserve the title.", newJNull(), %*{"token": "PRIVATE_PAYLOAD"}]:
+      let payload = %*{"type": "file_edit", "file_path": "stories/hero.nim",
+        "lines_added": 4, "lines_removed": 2, "message": "Legacy message",
+        "description": description, "credential": "PRIVATE_CREDENTIAL"}
+      let wire = harborEventToAgentEvent("s", eventFromJson(payload)).toJson()
+      let decoded = agentEventFromJson(wire)
+      let expected = if description.kind == JString: description.getStr() else: "Legacy message"
+      check decoded.kind == aekFileEdit
+      check decoded.text == expected
+      check not ($wire).contains("PRIVATE_PAYLOAD")
+      check not ($wire).contains("PRIVATE_CREDENTIAL")
+      var timeline: ActivityTimeline
+      check timeline.reduce(decoded)
+      check timeline.entries[^1].text == expected
+      check timeline.entries[^1].data.raw == nil
+      check timeline.entries[^1].data.filePath == "stories/hero.nim"
+      check timeline.entries[^1].data.linesAdded == 4
+      check timeline.entries[^1].data.linesRemoved == 2
+
+  test "reported connection status is presentation only with heartbeat and terminal semantics intact":
+    proc running(id: string): AgentEvent =
+      agentEventFromJson(harborEventToAgentEvent("s", eventFromJson(%*{
+        "type": "status", "status": "running", "eventId": id})).toJson())
+    let event = running("first")
+    check event.status == "running"
+    check event.state == acsStreaming
+    var timeline: ActivityTimeline
+    check timeline.reduce(event)
+    check timeline.entries[^1].status == "streaming"
+    check timeline.entries[^1].data.state == acsStreaming
+    check activityPresentation(timeline.entries[^1]).status == "running"
+    check activityPresentation(timeline.entries[^1]).tone == "attention"
+    let revision = timeline.revision
+    check not timeline.reduce(running("heartbeat"))
+    check not timeline.reduce(running("heartbeat"))
+    check timeline.revision == revision
+    check timeline.reduce(AgentEvent(kind: aekThoughtChunk, text: "Working", status: "running"))
+    check activityPresentation(timeline.entries[^1]).status == "streaming"
+    check timeline.reduce(AgentEvent(kind: aekMessageChunk, text: "Result"))
+    check timeline.reduce(AgentEvent(kind: aekCompleted, stopReason: srEndTurn))
+    check timeline.entries[1].status == "completed"
+    check timeline.entries[2].status == "completed"
+    check activityPresentation(timeline.entries[1]).status == "completed"
+    check activityPresentation(ActivityEntry(kind: aekConnection,
+      status: "connected", data: AgentEvent(state: acsConnected))).status == "connected"
+
   test "wire preserves typed input provenance without content guessing":
     var timeline: ActivityTimeline
     timeline.beginTurn("same text")

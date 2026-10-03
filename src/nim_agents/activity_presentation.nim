@@ -7,7 +7,7 @@ type
   ActivityFact* = object
     label*, value*, tone*: string
   ActivityPresentation* = object
-    surface*, tone*: string
+    surface*, tone*, status*: string
     facts*: seq[ActivityFact]
 
 proc stateTone(value: string): string =
@@ -29,7 +29,11 @@ proc activityPresentation*(entry: ActivityEntry): ActivityPresentation =
       of aekLlmRequest: "model"
       of aekError: "error"
       else: (if entry.data.sourceType.len > 0: entry.data.sourceType else: $entry.kind)
-  result.tone = stateTone(entry.status)
+  # Connection state is used for admission and stream lifecycle. A provider's
+  # reported status is a separate visible fact (running need not mean output).
+  result.status = if entry.kind == aekConnection and entry.data.status.len > 0:
+    entry.data.status else: entry.status
+  result.tone = stateTone(result.status)
   if entry.kind == aekError: result.tone = "error"
   if entry.data.sourceType in ["agent_question", "login_required", "session_awaiting_input"]:
     result.tone = "attention"
