@@ -244,3 +244,49 @@ suite "Opt-in agent activity":
     check timeline.entries[^1].text == "replyreply"
     check not timeline.reduce(AgentEvent(kind: aekMessageChunk))
     check timeline.revision == initial + 2
+
+  test "Harbor lifecycle heartbeats preserve contiguous words and actual transitions":
+    proc status(id, value: string): AgentEvent =
+      agentEventFromJson(harborEventToAgentEvent("s", eventFromJson(%*{
+        "type":"status", "status":value, "eventId":id})).toJson())
+    check status("first", "running").kind == aekConnection
+    var timeline: ActivityTimeline
+    timeline.beginTurn("first")
+    check timeline.reduce(status("first", "running"))
+    check timeline.reduce(AgentEvent(kind: aekMessageChunk, sessionId: "s", text: "EAC_ROLE_"))
+    let visible = timeline.revision
+    check not timeline.reduce(status("heartbeat", "running"))
+    check timeline.revision == visible
+    check not timeline.reduce(status("heartbeat", "running")) # ignored heartbeat retains durable replay identity
+    check timeline.reduce(AgentEvent(kind: aekMessageChunk, sessionId: "s", text: "GUIDANCE"))
+    check timeline.entries[^1].text == "EAC_ROLE_GUIDANCE"
+    check timeline.entries.len == 3
+    check timeline.reduce(AgentEvent(kind: aekStatus, sourceType: "status", sessionId: "s", status: "paused"))
+    check timeline.entries[^1].status == "paused"
+    check timeline.reduce(AgentEvent(kind: aekStatus, sourceType: "status", sessionId: "s", status: "paused", text: "actual explanation"))
+    check timeline.entries[^1].text == "actual explanation"
+    check timeline.reduce(AgentEvent(kind: aekStatus, sourceType: "login_required", sessionId: "s", status: "paused"))
+    timeline.beginTurn("second")
+    check timeline.reduce(AgentEvent(kind: aekStatus, sourceType: "status", sessionId: "s", status: "paused"))
+    check timeline.entries[^1].turn == 2
+
+  test "meaningful lifecycle resets plain heartbeat state in same turn and session":
+    for transition in [AgentEvent(kind: aekCompleted, stopReason: srEndTurn),
+        AgentEvent(kind: aekError, text: "provider failed"),
+        AgentEvent(kind: aekCancelled, stopReason: srCancelled),
+        AgentEvent(kind: aekConnection, state: acsConnecting, text: "reconnecting"),
+        AgentEvent(kind: aekStatus, sourceType: "session_resumed", text: "resumed"),
+        AgentEvent(kind: aekStatus, sourceType: "status", status: "running", text: "actual new detail")]:
+      var timeline: ActivityTimeline
+      timeline.beginTurn("request")
+      let running = AgentEvent(kind: aekConnection, sourceType: "status", sessionId: "s", status: "running", state: acsStreaming)
+      check timeline.reduce(running)
+      check timeline.reduce(transition)
+      check timeline.reduce(running)
+      let latest = timeline.entries[^1].id
+      check not timeline.reduce(running)
+      check timeline.entries[^1].id == latest
+      var other = running
+      other.sessionId = "other"
+      check timeline.reduce(other)
+      check timeline.reduce(running)

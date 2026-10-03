@@ -19,6 +19,8 @@ type
     revision*: int
     sequence: int
     seen: HashSet[string]
+    lastPlainStatus, lastPlainSession: string
+    lastPlainTurn: int
 
 proc appendEntry(timeline: var ActivityTimeline; entry: ActivityEntry) =
   var value = entry
@@ -55,6 +57,22 @@ proc reduce*(timeline: var ActivityTimeline; event: AgentEvent): bool {.discarda
     if event.text.len == 0: return false
     timeline.appendAssistant(event.text)
     return true
+  # Harbor's plain running status projects to aekConnection. Suppress only
+  # its exact empty heartbeat (including kind/state), preserving durable seen
+  # identities above and every meaningful status detail or actual transition.
+  let plainStatus = event.kind in {aekStatus, aekConnection} and event.sourceType == "status" and
+    event.text.len == 0 and event.presentationFields.len == 0 and event.status.len > 0
+  if not plainStatus and event.kind in {aekStatus, aekConnection, aekCompleted, aekCancelled, aekError, aekWorkspaceReady}:
+    timeline.lastPlainStatus = ""
+  if plainStatus:
+    let plain = $event.kind & ":" & $event.state & ":" & event.status
+    if timeline.lastPlainTurn == timeline.turn and
+        timeline.lastPlainSession == event.sessionId and
+        timeline.lastPlainStatus == plain:
+      return false
+    timeline.lastPlainTurn = timeline.turn
+    timeline.lastPlainSession = event.sessionId
+    timeline.lastPlainStatus = plain
   var data = event
   data.raw = nil
   var entry = ActivityEntry(role: arActivity, kind: event.kind, data: data,
@@ -111,6 +129,7 @@ proc reduce*(timeline: var ActivityTimeline; event: AgentEvent): bool {.discarda
   of aekConnection: entry.status = $event.state
   of aekStatus:
     if event.text.len == 0 and event.status.len == 0 and event.sourceType.len == 0: return false
+
   else: discard
   timeline.appendEntry entry
   true

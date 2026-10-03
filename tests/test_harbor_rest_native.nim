@@ -4,7 +4,7 @@
 ## cannot be obtained from a paid model. HTTP, sockets, the Nim stream parser,
 ## common event conversion, cursor reuse, and explicit session closure are all real.
 ## Every run retains its unique directory and HTTP log on failure.
-import std/[os, osproc, streams, tempfiles, strutils, unittest]
+import std/[os, osproc, streams, tempfiles, strutils, unittest, json]
 import nim_agents
 
 proc main() =
@@ -47,5 +47,34 @@ proc main() =
       client.closeSession(session)
       check fileExists(root / "stopped")
       echo "REST integration log: ", root / "http.log"
+
+    test "persistent completion waits for delayed actual paused before immediate followup":
+      for marker in ["first", "second", "repromptable"]:
+        if fileExists(root / marker): removeFile(root / marker)
+      writeFile(root / "persistent", "real persistent session API")
+      var client = fromHarbor(newNativeHarborClient("http://127.0.0.1:" & port))
+      let session = client.createSession(AgentStartMode(workspace: defaultWorkspaceContext(root),
+        prompt: @[textBlock("first")], acpAgent: acpAgentConfig("provider")))
+      check session.id == "session"
+      check session.capabilities.persistent
+      var messages: seq[string]
+      var pendingBoundaries=0
+      let callback: AgentEventCallback = proc(event: AgentEvent) {.gcsafe.} =
+        {.cast(gcsafe).}:
+          if event.kind == aekMessageChunk:
+            messages.add(event.text)
+            writeFile(root / event.text, "actual live callback")
+          if event.raw{"type"}.getStr() == "turn_complete":
+            check event.kind == aekStatus
+            check session.runtime.turn == atsWorking
+            inc pendingBoundaries
+      check client.streamAgentTurn(session,callback).stopReason == srEndTurn
+      check fileExists(root / "repromptable")
+      check session.eventCursor.value == 3
+      check client.sendPromptStreaming(session,@[textBlock("second")],callback).stopReason == srEndTurn
+      check session.eventCursor.value == 7
+      check messages == @["first", "second"]
+      check pendingBoundaries == 2
+      client.closeSession(session)
 
 main()

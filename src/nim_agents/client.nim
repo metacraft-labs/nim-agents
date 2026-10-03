@@ -45,6 +45,8 @@ type
     eventCursor*: AgentEventCursor
     capabilities*: AgentSessionCapabilities
     runtime*: AgentSessionRuntime
+  PromptRejectedError* = object of HarborError
+    response*: PromptAcceptedResponse
   PromptTurn* = object
     session*: AgentSession
     stopReason*: StopReason
@@ -275,8 +277,8 @@ proc finishTurn(state: AgentSessionRuntime; reason: StopReason) =
   if state == nil: return
   withSessionState(state):
     if state.lifecycle != aslClosed:
-      state.turn = if reason == srEndTurn: atsCompleted else: atsFailed
-      if reason != srEndTurn and state.lifecycle != aslClosing:
+      state.turn = if reason in {srEndTurn, srMaxTokens}: atsCompleted else: atsFailed
+      if reason notin {srEndTurn, srMaxTokens} and state.lifecycle != aslClosing:
         state.lifecycle = aslFailed
 
 proc admitTurn(state: AgentSessionRuntime) =
@@ -344,9 +346,12 @@ when not defined(js):
     if cmd.len == 0:
       raise newException(AcpError,
         "fromStdioAcpAgent: empty command")
+    # Resolve the documented explicit override BEFORE applying a launch prefix.
+    # The lower transport must not replace the wrapper executable afterward.
+    let selected = getEnv("ISONIM_ACP_AGENT_CMD", cmd)
     let resolved =
-      if cmd.contains(DirSep) or fileExists(cmd): cmd
-      else: findExe(cmd)
+      if selected.contains(DirSep) or fileExists(selected): selected
+      else: findExe(selected)
     if resolved.len == 0:
       raise newException(AcpError,
         "fromStdioAcpAgent: command not found on PATH: " & cmd)
@@ -358,7 +363,7 @@ when not defined(js):
     let transport = newNativeStdioAcpTransport(launchBinary, argsSeq,
       defaultTimeoutMs = defaultTimeoutMs,
       idleTimeoutMs = idleTimeoutMs,
-      hardDeadlineMs = hardDeadlineMs)
+      hardDeadlineMs = hardDeadlineMs, allowCommandOverride = false)
     fromAcp(newAcpClient(transport))
 
   proc resolveFirstOnPath(candidates: openArray[string]): string =
@@ -1270,12 +1275,17 @@ proc closeSession*(client: var AgentClient; session: AgentSession) =
     raise newException(AcpError, "Explicit ACP session closure is not supported")
 
 proc startSession*(client: var AgentClient; cwd: string;
-    prompt: seq[ContentBlock] = @[]): AgentSession =
+    prompt: seq[ContentBlock] = @[]; systemInstructions = ""): AgentSession =
   case client.backend
   of abkAcp:
-    let session = client.acp.startSession(NewSessionRequest(cwd: cwd))
+    let meta = if systemInstructions.len > 0:
+                 %* {"systemPrompt": {"append": systemInstructions}}
+               else: nil
+    let session = client.acp.startSession(NewSessionRequest(cwd: cwd, meta: meta))
     AgentSession(id: session.sessionId, backend: abkAcp)
   of abkHarbor:
+    if systemInstructions.len > 0:
+      raise newException(HarborError, "Harbor REST task creation cannot deliver role instructions directly; use a provider launcher that supports system instructions")
     let response = client.harbor.createTask(buildHarborTaskRequest(HarborTaskConfig(
       workspace: defaultWorkspaceContext(cwd),
       prompt: prompt,
@@ -1307,6 +1317,23 @@ proc startSession*(client: var AgentClient;
 proc sendPromptStreaming*(client: var AgentClient; session: AgentSession;
     prompt: seq[ContentBlock]; onEvent: AgentEventCallback): PromptTurn
 
+proc rejectHarborPrompt(response: PromptAcceptedResponse) {.noreturn.} =
+  var details = %* {"stopReason": response.stopReason, "operationId": (if response.operationIdNull: newJNull() else: %response.operationId),
+    "noOperation": response.noOperation,
+    "deliveryState": (if response.deliveryStateNull: newJNull() else: %response.deliveryState), "limitChars": response.limitChars,
+    "currentChars": response.currentChars, "remainingChars": response.remainingChars,
+    "usedChars": response.usedChars, "overLimitBy": response.overLimitBy}
+  if not response.operationIdPresent: details.delete("operationId")
+  if not response.deliveryStatePresent: details.delete("deliveryState")
+  else: details["deliveryStateType"] = %response.deliveryStateType
+  let reason = if response.stopReason == "context_limit":
+    "Session context budget exceeded; backend reports " & $response.remainingChars &
+      " characters remaining. Shorten optional context/message or start a new conversation. "
+    else: "Harbor rejected the follow-up prompt: "
+  var error = newException(PromptRejectedError, reason & $details)
+  error.response = response
+  raise error
+
 proc sendPrompt*(client: var AgentClient; session: AgentSession;
     prompt: seq[ContentBlock]): PromptTurn =
   case client.backend
@@ -1320,7 +1347,7 @@ proc sendPrompt*(client: var AgentClient; session: AgentSession;
       return client.sendPromptStreaming(session, prompt, nil)
     let accepted = client.harbor.sendPrompt(session.id, @[harborTextBlock(harborPromptText(prompt))])
     if not accepted.accepted:
-      raise newException(HarborError, "Harbor rejected the follow-up prompt")
+      rejectHarborPrompt(accepted)
     PromptTurn(session: session, stopReason: srEndTurn, updates: @[])
 
 # --------------------------------------------------------------------------- #
@@ -1399,6 +1426,8 @@ proc streamAgentTurn*(client: var AgentClient; session: AgentSession;
     raise newException(HarborError, "streamAgentTurn requires Harbor")
   var reason = srError
   var observedRunning = false
+  var awaitingIdle = false
+  var successfulReason = srEndTurn
   let cursor = if session.eventCursor == nil: AgentEventCursor() else: session.eventCursor
   let callback: HarborStreamCallback = proc(event: HarborEvent; id: string): bool =
     if id.len > 0:
@@ -1407,13 +1436,22 @@ proc streamAgentTurn*(client: var AgentClient; session: AgentSession;
       inc cursor.value
     var mapped = harborEventToAgentEvent(session.id, event)
     if id.len > 0: mapped.eventId = id
+    if session.capabilities.persistent and mapped.kind == aekCompleted and
+        mapped.stopReason in {srEndTurn, srMaxTokens}:
+      # Durable model completion precedes the persistent worker's repromptable
+      # transition. Keep consuming this exact stream until actual paused.
+      awaitingIdle = true
+      successfulReason = mapped.stopReason
+      mapped.kind = aekStatus
+      mapped.state = acsStreaming
     if session.capabilities.persistent and event.kind == hekStatus:
       if event.status == "running": observedRunning = true
-      if event.status == "paused" and observedRunning:
+      if event.status == "paused" and (observedRunning or awaitingIdle):
         # Harbor ACP defines Paused as idle/repromptable after PromptResponse.
         mapped.kind = aekCompleted
         mapped.state = acsCompleted
-        mapped.stopReason = srEndTurn
+        mapped.stopReason = successfulReason
+        awaitingIdle = false
       elif event.status == "completed":
         mapped.kind = aekError
         mapped.state = acsError
@@ -1421,11 +1459,14 @@ proc streamAgentTurn*(client: var AgentClient; session: AgentSession;
         mapped.text = "Persistent agent process ended unexpectedly"
     if onEvent != nil: onEvent(mapped)
     if mapped.kind in {aekCompleted, aekCancelled, aekError}:
+      awaitingIdle = false
       reason = mapped.stopReason
       return false
     true
   try:
     client.harbor.streamSessionEvents(session.id, callback, $cursor.value)
+    if awaitingIdle:
+      raise newException(HarborError, "Persistent provider stream ended before repromptable paused transition")
     finishTurn(session.runtime, reason)
   except CatchableError:
     finishTurn(session.runtime, srError)
@@ -1461,10 +1502,22 @@ proc sendPromptStreaming*(client: var AgentClient; session: AgentSession;
       try:
         let accepted = client.harbor.sendPrompt(session.id, @[harborTextBlock(text)])
         if not accepted.accepted:
-          raise newException(HarborError, "Harbor rejected the follow-up prompt")
+          rejectHarborPrompt(accepted)
       finally:
         endDelivery(session.runtime)
       result = client.streamAgentTurn(session, onEvent)
+    except PromptRejectedError as rejection:
+      if not rejection.response.accepted and rejection.response.stopReason == "context_limit" and
+          rejection.response.noOperation and rejection.response.deliveryState.len == 0 and
+          rejection.response.sessionId == session.id:
+        # This exact payload was explicitly rejected without a durable operation.
+        # Retain a usable persistent session for a deliberate edited retry.
+        if session.runtime != nil:
+          withSessionState(session.runtime):
+            if session.runtime.lifecycle == aslReady: session.runtime.turn = atsFailed
+      else:
+        finishTurn(session.runtime, srError)
+      raise
     except CatchableError:
       finishTurn(session.runtime, srError)
       raise
@@ -1647,6 +1700,14 @@ proc milestoneProgress*(client: AgentClient;
       completedMilestones: summary{"completedMilestones"}.getInt(0),
       progressPercent: summary{"progressPercent"}.getInt(0),
       raw: item)
+
+proc eventHistoryPage*(client: AgentClient; session: AgentSession;
+    limit = 0; before: int64 = 0): tuple[events: seq[AgentEvent], totalCount: int, hasMore: bool] =
+  ## Actual history boundary for consumers which must establish provider
+  ## continuity, without exposing backend raw graphs across threads.
+  client.requireHarbor()
+  let page = client.harbor.readEventHistory(session.id, EventHistoryQuery(limit: limit, before: before))
+  result = (harborEventsToAgentEvents(session.id, page.events), page.totalCount, page.hasMore)
 
 proc eventHistory*(client: AgentClient; session: AgentSession;
     limit = 0; before: int64 = 0): seq[AgentEvent] =

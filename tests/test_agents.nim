@@ -78,6 +78,54 @@ suite "nim-agents":
         check session.runtime.lifecycle == aslFailed
         check session.runtime.turn == atsFailed
 
+  test "durable successful completion waits for actual idle and preserves reason":
+    for stop in ["end_turn", "max_tokens"]:
+      let transport: HttpTransport = proc(req: HttpRequest): HttpResponse =
+        HttpResponse(status: 201, body: "{\"session_id\":\"pending\"}")
+      var harbor = newHarborClient("http://harbor.invalid", transport)
+      let reason = stop
+      var events: seq[AgentEvent]
+      harbor.streamTransport = proc(req: HttpRequest; callback: HarborStreamCallback) =
+        check callback(eventFromJson(%* {"type":"status", "status":"running"}), "1")
+        check callback(eventFromJson(%* {"type":"turn_complete", "stop_reason":reason}), "2")
+        check not callback(eventFromJson(%* {"type":"status", "status":"paused"}), "3")
+      var client = fromHarbor(harbor)
+      let session = client.createSession(AgentStartMode(workspace: defaultWorkspaceContext("/repo"),
+        prompt: @[textBlock("first")], acpAgent: acpAgentConfig("provider")))
+      let turn=client.streamAgentTurn(session, proc(event: AgentEvent) {.gcsafe.} =
+        {.cast(gcsafe).}: events.add(event))
+      check turn.stopReason == (if stop == "max_tokens": srMaxTokens else: srEndTurn)
+      check events[1].kind == aekStatus
+      check events[2].kind == aekCompleted
+      check session.eventCursor.value == 3
+      check session.runtime.lifecycle == aslReady
+
+  test "pending persistent completion cannot succeed on EOF error cancel or close":
+    for outcome in ["eof", "error", "cancelled", "closed"]:
+      let transport: HttpTransport = proc(req: HttpRequest): HttpResponse =
+        HttpResponse(status: 201, body: "{\"session_id\":\"pending\"}")
+      var harbor = newHarborClient("http://harbor.invalid", transport)
+      var client: AgentClient
+      var session: AgentSession
+      let finalOutcome=outcome
+      harbor.streamTransport = proc(req: HttpRequest; callback: HarborStreamCallback) =
+        check callback(eventFromJson(%* {"type":"turn_complete", "stop_reason":"end_turn"}), "1")
+        if finalOutcome == "eof": return
+        if finalOutcome == "closed": client.closeSession(session)
+        let terminal = if finalOutcome == "cancelled": %* {"type":"status","status":"cancelled"}
+          else: %* {"type":"error","message":"worker failed before idle"}
+        check not callback(eventFromJson(terminal), "2")
+      client=fromHarbor(harbor)
+      session=client.createSession(AgentStartMode(workspace: defaultWorkspaceContext("/repo"),
+        prompt: @[textBlock("first")], acpAgent: acpAgentConfig("provider")))
+      if outcome == "eof":
+        expect HarborError: discard client.streamAgentTurn(session,nil)
+        check session.runtime.turn == atsFailed
+      else:
+        let turn=client.streamAgentTurn(session,nil)
+        check turn.stopReason == (if outcome == "cancelled": srCancelled else: srError)
+        if outcome == "closed":check session.runtime.lifecycle == aslClosed
+
   test "persistent nonstream waits and completion cannot revive a closed session":
     for terminal in ["paused", "failed"]:
       var deliveries = 0
@@ -123,6 +171,57 @@ suite "nim-agents":
       expect HarborError:
         discard client.sendPrompt(session, @[textBlock("after close")])
       check deliveries == 1
+
+  test "only validated absent or null no-operation context rejection leaves the same session retryable":
+    for boundary in ["null", "omitted", "malformed", "empty", "uncertain", "wrongsession"]:
+      var submitted: seq[string]
+      let mode = boundary
+      let transport: HttpTransport = proc(req: HttpRequest): HttpResponse =
+        if req.url.endsWith("/api/v1/sessions"):
+          return HttpResponse(status: 201, body: "{\"session_id\":\"same-provider\"}")
+        if req.url.contains("/events/history"):
+          return HttpResponse(status: 200, body: "{\"events\":[],\"total_count\":2}")
+        if req.url.endsWith("/prompt"):
+          submitted.add(parseJson(req.body)["prompt"].getStr())
+          if submitted.len > 1:
+            return HttpResponse(status:200,body:"{\"accepted\":true,\"sessionId\":\"same-provider\"}")
+          var rejection = %* {"accepted":false,"sessionId":"same-provider", "stopReason":"context_limit",
+            "limitChars":100,"currentChars":96,"remainingChars":4,"usedChars":101,"overLimitBy":1}
+          if mode == "wrongsession": rejection["sessionId"] = %"different-session"
+          elif mode == "null": rejection["operationId"] = newJNull()
+          elif mode == "malformed": rejection.delete("remainingChars")
+          elif mode == "empty": rejection["operationId"] = %""
+          elif mode == "uncertain":
+            rejection["operationId"] = %"durable-operation"
+            rejection["deliveryState"] = %"uncertain"
+          return HttpResponse(status:200,body: $rejection)
+        HttpResponse(status:200,body:"{}")
+      var harbor = newHarborClient("http://harbor.invalid",transport)
+      harbor.streamTransport = proc(req: HttpRequest; callback: HarborStreamCallback) =
+        discard callback(eventFromJson(%* {"type":"status","status":"running"}),"1")
+        discard callback(eventFromJson(%* {"type":"status","status":"paused"}),"2")
+      var client=fromHarbor(harbor)
+      let session=client.createSession(AgentStartMode(workspace:defaultWorkspaceContext("/repo"),
+        prompt: @[textBlock("initial")],acpAgent:acpAgentConfig("provider")))
+      discard client.streamAgentTurn(session,nil)
+      try:
+        discard client.sendPromptStreaming(session,@[textBlock("保持😀😀")],nil)
+        check false
+      except PromptRejectedError as error:
+        check error.response.remainingChars == (if mode == "malformed": -1 else: 4)
+        check error.response.currentChars == 96
+        check error.response.noOperation == (mode in ["null", "omitted", "wrongsession"])
+        check error.msg.contains($error.response.remainingChars & " characters remaining")
+      check submitted == @["保持😀😀"]
+      check session.id == "same-provider"
+      if mode in ["null", "omitted"]:
+        check session.runtime.lifecycle == aslReady
+        check client.sendPromptStreaming(session,@[textBlock("😀")],nil).stopReason == srEndTurn
+        check submitted == @["保持😀😀","😀"]
+      else:
+        check session.runtime.lifecycle == aslFailed
+        expect HarborError: discard client.sendPromptStreaming(session,@[textBlock("😀")],nil)
+        check submitted.len == 1
 
   test "followup preserves textual resource context and rejects unsupported media":
     var bodies: seq[JsonNode]
@@ -600,3 +699,37 @@ suite "nim-agents":
     check seen.contains("GET http://harbor.invalid/api/v1/tasks/task-rest/milestones")
     check seen.contains("GET http://harbor.invalid/api/v1/sessions/session-rest/info")
     check seen.contains("GET http://harbor.invalid/api/v1/sessions/session-rest/events/history?limit=10")
+
+
+suite "common client role instructions":
+  test "ACP role instructions use actual session/new metadata without a user primer":
+    var requests: seq[JsonNode]
+    var acp = newAcpClient(proc(wire: string): string =
+      let request = parseJson(wire)
+      requests.add request
+      $(%* {"jsonrpc":"2.0", "id":request["id"], "result":{"sessionId":"role-session"}}))
+    var client = fromAcp(acp)
+    let session = client.startSession("/project", systemInstructions = "Full framework guidance\nEditor CLI instructions")
+    check session.id == "role-session"
+    check requests.len == 1
+    check requests[0]["method"].getStr == "session/new"
+    check requests[0]["params"]["_meta"]["systemPrompt"]["append"].getStr == "Full framework guidance\nEditor CLI instructions"
+
+  test "disabled role instructions preserve legacy session/new shape":
+    var observed: JsonNode
+    var acp = newAcpClient(proc(wire: string): string =
+      observed = parseJson(wire)
+      $(%* {"jsonrpc":"2.0", "id":observed["id"], "result":{"sessionId":"plain-session"}}))
+    var client = fromAcp(acp)
+    discard client.startSession("/project")
+    check not observed["params"].hasKey("_meta")
+
+  test "unsupported REST role delivery fails before any provider or task is launched":
+    var calls = 0
+    let transport: HttpTransport = proc(request: HttpRequest): HttpResponse =
+      inc calls
+      HttpResponse(status: 500)
+    var client = fromHarbor(newHarborClient("http://harbor.invalid", transport))
+    expect HarborError:
+      discard client.startSession("/project", systemInstructions = "Required role guidance")
+    check calls == 0

@@ -77,3 +77,33 @@ os.execv(sys.argv[2],sys.argv[2:])
       expect AcpError:
         discard client.acp.initialize(InitializeRequest(protocolVersion: 1))
     finally: shutdown(client)
+
+
+  test "non-python executable override cannot bypass the scoped wrapper":
+    let directory = createTempDir("agents-prefix-executable-", "")
+    defer: removeDir(directory)
+    let python = findExe("python3")
+    let peer = directory / "actual-provider"
+    writeFile(peer, "#!" & python & "\n" & """
+import json,os,sys
+for line in sys.stdin:
+ r=json.loads(line)
+ result={'protocolVersion':1,'agentCapabilities':{'text':True}} if r['method']=='initialize' else {'sessionId':json.dumps({'marker':os.environ.get('PREFIX_MARKER'),'args':sys.argv[1:]})}
+ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}),flush=True)
+""")
+    setFilePermissions(peer, {fpUserRead, fpUserWrite, fpUserExec})
+    let wrapper = directory / "wrapper.py"
+    writeFile(wrapper, "import os,sys\nos.environ['PREFIX_MARKER']='scoped-original'\nos.execv(sys.argv[1],sys.argv[1:])\n")
+    let old = getEnv("ISONIM_ACP_AGENT_CMD")
+    defer:
+      if old.len > 0: putEnv("ISONIM_ACP_AGENT_CMD", old)
+      else: delEnv("ISONIM_ACP_AGENT_CMD")
+    putEnv("ISONIM_ACP_AGENT_CMD", peer)
+    var client = fromClaudeCodeAcp(@["preserved", "two words"], launchPrefix = @[python, wrapper])
+    try:
+      discard client.acp.initialize(InitializeRequest(protocolVersion: 1))
+      let session = client.startSession(directory)
+      let actual = parseJson(session.id)
+      check actual["marker"].getStr == "scoped-original"
+      check actual["args"] == %(@["preserved", "two words"])
+    finally: shutdown(client)

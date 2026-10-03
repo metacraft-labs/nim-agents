@@ -35,11 +35,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             assert "url" not in body["repo"]
             assert body["agents"][0]["type"] == "claude"
             self.json({"taskId": "task", "sessionIds": ["session"]})
+        elif self.path == "/api/v1/sessions":
+            assert body["prompt"] == "first"
+            self.json({"session_id": "session"})
         elif self.path.endswith("/prompt"):
             if body["prompt"] == "reject":
                 self.json({"accepted": False, "stopReason": "delivery_uncertain"})
                 return
             assert body["prompt"] == "second", body
+            if (root / "persistent").exists():
+                assert (root / "repromptable").exists(), "Followup arrived before persistent paused"
             self.json({"sessionId": "session", "accepted": True})
         elif self.path.endswith("/stop"):
             (root / "stopped").touch()
@@ -49,12 +54,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.startswith("/api/v1/sessions/session/events/history"):
-            self.json({"events": [], "total_count": 3})
+            self.json({"events": [], "total_count": 4 if (root / "persistent").exists() else 3})
             return
         assert self.path == "/api/v1/sessions/session/events"
         cursor = self.headers.get("Last-Event-ID", "0")
-        assert cursor in ("0", "3"), cursor
-        second = cursor == "3"
+        following = "4" if (root / "persistent").exists() else "3"
+        assert cursor in ("0", following), cursor
+        second = cursor == following
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Transfer-Encoding", "chunked")
@@ -65,8 +71,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(f"{len(raw):x}\r\n".encode() + raw + b"\r\n")
             self.wfile.flush()
 
-        event_id = 4 if second else 1
+        event_id = (5 if (root / "persistent").exists() else 4) if second else 1
         message = "second" if second else "first"
+        chunk(f'id: {event_id - 1}\ndata: {{"type":"status","status":"running"}}\n\n')
         # Split both the SSE field name and the JSON payload over chunks.
         chunk(f"id: {event_id}\r\nda")
         chunk('ta: {"type":"log",\r\ndata: "message":"')
@@ -76,6 +83,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             time.sleep(0.01)
         assert (root / message).exists(), "callback was buffered until EOF"
         chunk(f'id: {event_id + 1}\ndata: {{"type":"turn_complete","stop_reason":"end_turn"}}\n\n')
+        # Real stream remains pending after durable success; immediate followup
+        # is invalid until the actual persistent idle boundary is published.
+        if (root / "persistent").exists():
+            time.sleep(.15)
+            (root / "repromptable").touch()
+            chunk(f'id: {event_id + 2}\ndata: {{"type":"status","status":"paused"}}\n\n')
         try:
             self.wfile.write(b"0\r\n\r\n")
         except BrokenPipeError:
