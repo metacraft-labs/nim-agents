@@ -369,11 +369,28 @@ proc toHarborContentBlocks*(items: openArray[ContentBlock]): seq[
     result.add item.toHarborContentBlock()
 
 proc promptText*(items: openArray[ContentBlock]): string =
+  ## Harbor accepts a string prompt. Preserve resource identity as one JSON
+  ## context line without fetching URIs; JSON escaping prevents embedded URI
+  ## or MIME newlines from changing the block framing. Text-only bytes retain
+  ## their existing representation and order.
   for item in items:
-    if item.kind == cbText and item.text.len > 0:
+    var blockText: string
+    case item.kind
+    of cbText:
+      blockText = item.text
+    of cbResource:
+      if item.uri.len == 0:
+        raise newException(ValueError, "resource context requires a nonempty URI")
+      var resource = %*{"uri": item.uri}
+      if item.mimeType.len > 0:
+        resource["mimeType"] = %item.mimeType
+      blockText = "resource: " & $resource
+    else:
+      discard
+    if blockText.len > 0:
       if result.len > 0:
         result.add "\n\n"
-      result.add item.text
+      result.add blockText
 
 proc defaultWorkspaceContext*(cwd = ""): AgentWorkspaceContext =
   AgentWorkspaceContext(repoMode: "none", cwd: cwd)

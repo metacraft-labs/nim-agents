@@ -1,3 +1,8 @@
+# Existing HTTP/SSE callbacks isolate transport framing and deterministically
+# supply events while real request serialization and client state transitions
+# execute. They replace no filesystem/compiler boundary. Resource-context tests
+# call the real task builder/serializer without transport; no server acceptance
+# is inferred from these isolated request and event-parser checks.
 import unittest
 import std/json
 import std/strutils
@@ -54,6 +59,32 @@ suite "nim-agents":
     var rawAcp = agents.acp
     discard rawAcp.startSession(NewSessionRequest(cwd: "/tmp/advanced"))
     check harborAgents.harbor.baseUrl == "http://localhost:18080"
+
+  test "harbor_prompt_preserves_text_bytes_and_ordered_resource_identity":
+    let uri = "file:///work/isonim/src/Button.nim#L42"
+    let escapedUri = "file:///work/quote\"\\name\nsource.nim#L7"
+    let mime = "text/x-nim\nparameter=\"quoted\""
+    let items = @[textBlock("  original\ntext  "), resourceBlock(uri, "text/x-nim"),
+      textBlock(""), resourceBlock(escapedUri, mime), textBlock("trailing context")]
+    let req = buildHarborTaskRequest(HarborTaskConfig(prompt: items))
+    let node = taskToJson(req)
+    check node["prompt"].kind == JString
+    let parts = node["prompt"].getStr.split("\n\n")
+    check parts.len == 4
+    check parts[0] == "  original\ntext  "
+    check parts[1].startsWith("resource: ")
+    check parts[2].startsWith("resource: ")
+    let first = parseJson(parts[1]["resource: ".len .. ^1])
+    let second = parseJson(parts[2]["resource: ".len .. ^1])
+    check first == %*{"uri": uri, "mimeType": "text/x-nim"}
+    check second == %*{"uri": escapedUri, "mimeType": mime}
+    check parts[3] == "trailing context"
+    check promptText(@[textBlock("one"), textBlock(""), textBlock("two\nlines")]) ==
+      "one\n\ntwo\nlines"
+    check promptText(@[resourceBlock("file:///plain")]) ==
+      "resource: {\"uri\":\"file:///plain\"}"
+    expect ValueError:
+      discard promptText(@[textBlock("retained"), resourceBlock("")])
 
   test "agent_client_harbor_task_request_supports_acp_agent":
     let req = buildHarborTaskRequest(HarborTaskConfig(
