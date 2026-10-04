@@ -2,6 +2,9 @@
 ## safe AgentEvent JSON -> decoded event -> reducer. No mocks: inputs are event
 ## data, not a replacement client/VM. Verify identity, authorship, turn isolation,
 ## merged tool results, streamed content, private-field omission and real metrics.
+## Current-condition cases additionally exercise actual DTO/wire projection,
+## request correlation, replay, resumption, terminal events and turn isolation;
+## presentation never grants admission or changes a backend lifecycle.
 import std/[unittest, json, strutils]
 import nim_agents
 import nim_agents/[activity, activity_presentation]
@@ -337,3 +340,79 @@ suite "Opt-in agent activity":
       other.sessionId = "other"
       check timeline.reduce(other)
       check timeline.reduce(running)
+
+  test "current reported condition is turn scoped and never a completion signal":
+    var timeline: ActivityTimeline
+    timeline.beginTurn("First request")
+    proc feed(payload: JsonNode): AgentEvent =
+      result = agentEventFromJson(harborEventToAgentEvent("session",
+        eventFromJson(payload)).toJson())
+      timeline.reduce(result)
+    let login = feed(%*{"type": "login_required", "provider": "anthropic", "request": "login-1", "eventId": "login"})
+    check login.kind == aekStatus
+    check login.status == ""
+    check reportedActivityCondition(timeline) == "Sign-in required"
+    discard feed(%*{"type": "session_awaiting_input", "request": "login-1"})
+    check reportedActivityCondition(timeline) == "Sign-in required"
+    discard feed(%*{"type": "status", "status": "running"})
+    check reportedActivityCondition(timeline) == "Sign-in required"
+    discard feed(%*{"type": "session_awaiting_input", "request": "other"})
+    check reportedActivityCondition(timeline) == "Waiting for input"
+    discard feed(%*{"type": "session_resumed", "deliverer": "human"})
+    check reportedActivityCondition(timeline) == ""
+    discard feed(%*{"type": "agent_question", "kind": "free_form", "prompt": "Choose a name", "request": "q"})
+    check reportedActivityCondition(timeline) == "Waiting for input"
+    discard feed(%*{"type": "session_ended", "outcome": "completed"})
+    check reportedActivityCondition(timeline) == "Agent reported completion"
+    check not timeline.reduce(login)
+    check reportedActivityCondition(timeline) == "Agent reported completion"
+    timeline.beginTurn("Second request")
+    check reportedActivityCondition(timeline) == ""
+    discard feed(%*{"type": "session_ended", "outcome": "failed"})
+    check reportedActivityCondition(timeline) == "Agent reported failure"
+    timeline.reduce(AgentEvent(kind: aekError, text: "Disconnected"))
+    check reportedActivityCondition(timeline) == ""
+    discard feed(%*{"type": "login_required", "provider": "anthropic", "request": "login-2"})
+    timeline.reduce(AgentEvent(kind: aekCompleted))
+    check reportedActivityCondition(timeline) == ""
+    discard feed(%*{"type": "session_awaiting_input", "request": "q"})
+    timeline.reduce(AgentEvent(kind: aekConnection, state: acsCancelled))
+    check reportedActivityCondition(timeline) == ""
+    discard feed(%*{"type": "session_awaiting_input", "request": "q"})
+    timeline.reduce(AgentEvent(kind: aekMessageChunk, text: "Continuing"))
+    check reportedActivityCondition(timeline) == ""
+    timeline = ActivityTimeline()
+    check reportedActivityCondition(timeline) == ""
+
+  test "real REST prose aggregation clears waits using entry semantics without raw data":
+    var timeline: ActivityTimeline
+    timeline.beginTurn("Build the hero")
+    proc feed(payload: JsonNode) =
+      timeline.reduce(agentEventFromJson(harborEventToAgentEvent("s",
+        eventFromJson(payload)).toJson()))
+    feed(%*{"type": "log", "level": "info", "message": "First", "eventId": "prose-1"})
+    let first = timeline.entries[^1].id
+    feed(%*{"type": "log", "level": "info", "message": " continued", "eventId": "prose-2"})
+    check timeline.entries[^1].id == first
+    check timeline.entries[^1].text == "First continued"
+    check timeline.entries[^1].role == arAssistant
+    check timeline.entries[^1].kind == aekMessageChunk
+    # The transcript aggregate deliberately does not store a backend envelope.
+    check timeline.entries[^1].data.kind == aekConnection
+    check timeline.entries[^1].data.raw == nil
+    feed(%*{"type": "login_required", "provider": "anthropic", "request": "login"})
+    feed(%*{"type": "session_awaiting_input", "request": "login"})
+    check reportedActivityCondition(timeline) == "Sign-in required"
+    feed(%*{"type": "log", "level": "info", "message": "Resumed", "eventId": "prose-3"})
+    let resumed = timeline.entries[^1].id
+    check resumed != first
+    check timeline.entries[^1].kind == aekMessageChunk
+    check reportedActivityCondition(timeline) == ""
+    feed(%*{"type": "log", "level": "info", "message": " authoring", "eventId": "prose-4"})
+    check timeline.entries[^1].id == resumed
+    check timeline.entries[^1].text == "Resumed authoring"
+    check reportedActivityCondition(timeline) == ""
+    feed(%*{"type": "agent_question", "kind": "free_form", "prompt": "Continue?", "request": "q"})
+    check reportedActivityCondition(timeline) == "Waiting for input"
+    feed(%*{"type": "log", "level": "info", "message": "Continuing", "eventId": "prose-5"})
+    check reportedActivityCondition(timeline) == ""

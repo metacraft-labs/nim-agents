@@ -104,3 +104,54 @@ proc activityPresentation*(entry: ActivityEntry): ActivityPresentation =
         else: field.name.replace("_", " ").capitalizeAscii()
       fact(label, field.value, if field.name in ["kind", "outcome", "transition"]:
         stateTone(field.value) else: "neutral")
+
+proc reportedActivityCondition*(timeline: ActivityTimeline): string =
+  ## Provider reports describe the current turn, not transport completion or
+  ## permission to send. Requests retain their meaning across the subsequent
+  ## awaiting-input event only when it identifies the same request.
+  var request = ""
+  var first = timeline.entries.len
+  while first > 0 and timeline.entries[first - 1].turn == timeline.turn:
+    dec first
+  for index in first ..< timeline.entries.len:
+    let event = timeline.entries[index].data
+    case timeline.entries[index].kind
+    of aekCompleted, aekCancelled, aekError:
+      result = ""
+      request = ""
+    of aekConnection:
+      if event.state in {acsCompleted, acsCancelled, acsError, acsDisconnected}:
+        result = ""
+        request = ""
+    of aekMessageChunk, aekThoughtChunk:
+      result = ""
+      request = ""
+    else:
+      case event.sourceType
+      of "session_started", "session_resumed":
+        result = ""
+        request = ""
+      of "agent_question", "login_required":
+        result = if event.sourceType == "login_required": "Sign-in required"
+          else: "Waiting for input"
+        request = ""
+        for field in event.presentationFields:
+          if field.name == "request": request = field.value
+      of "session_awaiting_input":
+        var incoming = ""
+        for field in event.presentationFields:
+          if field.name == "request": incoming = field.value
+        if result != "Sign-in required" or incoming.len == 0 or incoming != request:
+          result = "Waiting for input"
+        request = incoming
+      of "session_ended":
+        result = "Agent reported session end"
+        request = ""
+        for field in event.presentationFields:
+          if field.name == "outcome":
+            case field.value
+            of "completed": result = "Agent reported completion"
+            of "failed": result = "Agent reported failure"
+            of "interrupted": result = "Agent reported interruption"
+            else: discard
+      else: discard
