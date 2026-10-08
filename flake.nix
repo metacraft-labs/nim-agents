@@ -151,6 +151,32 @@
         {
           checks.pre-commit = preCommit;
           apps = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            capture-ci-checkout-authority = {
+              type = "app";
+              program = toString (
+                pkgs.writeShellScript "capture-ci-checkout-authority" ''
+                  export PATH=${
+                    pkgs.lib.makeBinPath [
+                      pkgs.git
+                      pkgs.bash
+                      pkgs.coreutils
+                    ]
+                  }
+                  export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+                  umask 0022
+                  exec ${pkgs.bash}/bin/bash ${./ci/capture-checkout-git-templates.sh} "$@"
+                ''
+              );
+            };
+            prepare-ci-checkout = {
+              type = "app";
+              program = toString (
+                pkgs.writeShellScript "prepare-ci-checkout" ''
+                  exec ${pkgs.python3}/bin/python3 -I ${./nix/ci-declared-checkout.py} \
+                    ${pkgs.git}/bin/git ${pkgs.git}/share/git-core/templates "$@"
+                ''
+              );
+            };
             prepare-ci-hook-samples = {
               type = "app";
               program = toString (

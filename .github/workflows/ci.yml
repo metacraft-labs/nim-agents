@@ -32,7 +32,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          path: nim-agents
+          path: ${{ matrix.runner[1] == 'linux' && 'nim-agents-bootstrap' || 'nim-agents' }}
       - uses: actions/checkout@v4
         with:
           repository: metacraft-labs/nim-everywhere
@@ -45,18 +45,24 @@ jobs:
         with:
           repository: metacraft-labs/nim-agent-harbor
           path: nim-agent-harbor
-      - name: Capture initial checkout Git authority
-        if: matrix.runner[1] == 'linux'
-        shell: bash
-        run: |
-          mkdir -p .repro
-          bash ci/capture-checkout-git-templates.sh .repro/ci-git-authority
       - name: Setup Nix
         uses: metacraft-labs/devops-modules/.github/setup-nix@dev
         with:
           trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
           substituters: ${{ vars.SUBSTITUTERS }}
           nix-github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create declared Git exact-event checkout
+        if: matrix.runner[1] == 'linux'
+        working-directory: nim-agents-bootstrap
+        shell: bash
+        run: |
+          nix run .#prepare-ci-checkout -- "$PWD" "$GITHUB_WORKSPACE/nim-agents" "${{ github.sha }}" "$GITHUB_WORKSPACE" > "$GITHUB_WORKSPACE/declared-checkout-test.json"
+      - name: Capture initial checkout Git authority
+        if: matrix.runner[1] == 'linux'
+        shell: bash
+        run: |
+          mkdir -p .repro
+          nix run .#capture-ci-checkout-authority -- .repro/ci-git-authority
       # `shell: bash` is load-bearing, not style. The default `run` shell is
       # `bash -e` WITHOUT pipefail, so `cmd | tee` takes tee's exit status and a
       # failing command was reported as a passing job. `shell: bash` selects
@@ -78,6 +84,7 @@ jobs:
         with:
           name: initial-git-authority-test-${{ join(matrix.runner, '-') }}
           path: |
+            declared-checkout-test.json
             nim-agents/.repro/ci-git-authority/*.tsv
             nim-agents/.repro/ci-git-authority/*.sha256
             nim-agents/.repro/ci-git-authority/git-image.txt
@@ -103,7 +110,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          path: nim-agents
+          path: ${{ matrix.runner[1] == 'linux' && 'nim-agents-bootstrap' || 'nim-agents' }}
       - uses: actions/checkout@v4
         with:
           repository: metacraft-labs/nim-everywhere
@@ -116,18 +123,24 @@ jobs:
         with:
           repository: metacraft-labs/nim-agent-harbor
           path: nim-agent-harbor
-      - name: Capture initial checkout Git authority
-        if: matrix.runner[1] == 'linux'
-        shell: bash
-        run: |
-          mkdir -p .repro
-          bash ci/capture-checkout-git-templates.sh .repro/ci-git-authority
       - name: Setup Nix
         uses: metacraft-labs/devops-modules/.github/setup-nix@dev
         with:
           trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
           substituters: ${{ vars.SUBSTITUTERS }}
           nix-github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create declared Git exact-event checkout
+        if: matrix.runner[1] == 'linux'
+        working-directory: nim-agents-bootstrap
+        shell: bash
+        run: |
+          nix run .#prepare-ci-checkout -- "$PWD" "$GITHUB_WORKSPACE/nim-agents" "${{ github.sha }}" "$GITHUB_WORKSPACE" > "$GITHUB_WORKSPACE/declared-checkout-lint.json"
+      - name: Capture initial checkout Git authority
+        if: matrix.runner[1] == 'linux'
+        shell: bash
+        run: |
+          mkdir -p .repro
+          nix run .#capture-ci-checkout-authority -- .repro/ci-git-authority
       # See the note on the first tee'd step: without pipefail, `| tee` masks failure.
       - name: Prepare exact selected Git samples
         if: matrix.runner[1] == 'linux'
@@ -146,6 +159,7 @@ jobs:
         with:
           name: initial-git-authority-lint-${{ join(matrix.runner, '-') }}
           path: |
+            declared-checkout-lint.json
             nim-agents/.repro/ci-git-authority/*.tsv
             nim-agents/.repro/ci-git-authority/*.sha256
             nim-agents/.repro/ci-git-authority/git-image.txt
