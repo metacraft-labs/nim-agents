@@ -163,7 +163,7 @@ jobs:
           if [[ "$RUNNER_OS" == Windows ]]; then
             "$NIM_NATIVE_PYTHON" -B ci/qualify-actions-native-contracts.py prepare
           else
-            python3 ci/qualify-actions-native-contracts.py prepare
+            "${REPROBUILD_BOOTSTRAP_PYTHON:?Missing declared SDK Python}" -B ci/qualify-actions-native-contracts.py prepare
           fi
 
       - name: Check out published Actions native contract source
@@ -185,7 +185,7 @@ jobs:
           if [[ "$RUNNER_OS" == Windows ]]; then
             "$NIM_NATIVE_PYTHON" -B ci/qualify-actions-native-contracts.py execute "${{ matrix.arch }}"
           else
-            python3 ci/qualify-actions-native-contracts.py execute "${{ matrix.arch }}"
+            "${REPROBUILD_BOOTSTRAP_PYTHON:?Missing declared SDK Python}" -B ci/qualify-actions-native-contracts.py execute "${{ matrix.arch }}"
           fi
 
       - name: Remove only unchanged owned native Python runtime
