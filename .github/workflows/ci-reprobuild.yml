@@ -161,12 +161,17 @@ jobs:
       # fails earlier than x64, and x64 fails for an unrelated project-level reason
       # (`cannot open file: results`, codetracer_ct_print.nim(24, 8)). These
       # artifacts are the only way to find out why any of it actually fails.
+      - name: Diagnose Windows compiler files after original failure
+        if: failure() && runner.os == 'Windows'
+        run: dev-exec pwsh -NoProfile -File ci/diagnose-windows-compiler.ps1 -Architecture "${{ matrix.arch }}"
+
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: reprobuild-logs-${{ matrix.os }}-${{ matrix.arch }}
           path: |
+            .repro/compiler-diagnostics/
             .repro/build/*/build-failure-report.json
             .repro/build/*/build-engine-cache/actions/
           include-hidden-files: true
