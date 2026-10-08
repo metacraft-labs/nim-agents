@@ -150,6 +150,19 @@
         in
         {
           checks.pre-commit = preCommit;
+          apps = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            prepare-ci-hook-samples = {
+              type = "app";
+              program = toString (
+                pkgs.writeShellScript "prepare-ci-hook-samples" ''
+                  exec ${pkgs.python3}/bin/python3 -I ${./nix/ci-initial-samples-transition.py} \
+                    ${pkgs.git}/bin/git \
+                    ${builtins.hashFile "sha256" ./ci/capture-checkout-git-templates.sh} \
+                    ${builtins.hashFile "sha256" ./flake.nix} "$@"
+                ''
+              );
+            };
+          };
           devShells.default = pkgs.mkShell {
             packages =
               preCommit.enabledPackages
