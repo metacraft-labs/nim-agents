@@ -159,7 +159,10 @@ package nim_agents:
     # C back-end ``nim c`` shells out to. Sufficient for the path-mode
     # resolver under ``nix develop``.
     "nim >=2.0"
-    "gcc >=12"
+    when defined(macosx):
+      "clang >=14"
+    else:
+      "gcc >=12"
 
     # Sibling Nim-library producers (SC-11 develop-mode from-source
     # consumption). ``src/nim_agents/client.nim`` + ``src/nim_agents.nim`` +
@@ -216,8 +219,10 @@ package nim_agents:
         paths = @["src"],
         actionId = "nim_agents.test_build." & stem,
         extraInputs = @["src", "nim_agents.nimble"])
-      when defined(linux):
-        # Bind the already-declared C backend to this exact typed compile.
+      when defined(macosx):
+        appendRegisteredActionToolIdentityRefs(edge.action.id, ["clang"])
+      elif defined(linux) or defined(windows):
+        # Bind the real platform C backend to this exact typed compile.
         appendRegisteredActionToolIdentityRefs(edge.action.id, ["gcc"])
       buildActions.add(edge.action)
       # ``registerImplicitName = false`` because the BUILD edge already owns
