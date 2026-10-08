@@ -13,6 +13,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+defaults:
+  run:
+    working-directory: nim-agents
+
 jobs:
   test:
     strategy:
@@ -27,18 +31,20 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: nim-agents
       - uses: actions/checkout@v4
         with:
           repository: metacraft-labs/nim-everywhere
-          path: ../nim-everywhere
+          path: nim-everywhere
       - uses: actions/checkout@v4
         with:
           repository: metacraft-labs/nim-acp
-          path: ../nim-acp
+          path: nim-acp
       - uses: actions/checkout@v4
         with:
           repository: metacraft-labs/nim-agent-harbor
-          path: ../nim-agent-harbor
+          path: nim-agent-harbor
       - name: Setup Nix
         uses: metacraft-labs/devops-modules/.github/setup-nix@dev
         with:
@@ -55,7 +61,7 @@ jobs:
         if: always()
         with:
           name: test-log-${{ join(matrix.runner, '-') }}
-          path: test.log
+          path: nim-agents/test.log
   lint:
     strategy:
       fail-fast: false
@@ -69,18 +75,20 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: nim-agents
       - uses: actions/checkout@v4
         with:
           repository: metacraft-labs/nim-everywhere
-          path: ../nim-everywhere
+          path: nim-everywhere
       - uses: actions/checkout@v4
         with:
           repository: metacraft-labs/nim-acp
-          path: ../nim-acp
+          path: nim-acp
       - uses: actions/checkout@v4
         with:
           repository: metacraft-labs/nim-agent-harbor
-          path: ../nim-agent-harbor
+          path: nim-agent-harbor
       - name: Setup Nix
         uses: metacraft-labs/devops-modules/.github/setup-nix@dev
         with:
@@ -94,7 +102,7 @@ jobs:
         if: always()
         with:
           name: lint-log-${{ join(matrix.runner, '-') }}
-          path: lint.log
+          path: nim-agents/lint.log
   nix-build:
     strategy:
       fail-fast: false
@@ -108,6 +116,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: nim-agents
       - name: Setup Nix
         uses: metacraft-labs/devops-modules/.github/setup-nix@dev
         with:
@@ -121,4 +131,4 @@ jobs:
         if: always()
         with:
           name: nix-build-log-${{ join(matrix.runner, '-') }}
-          path: nix-build.log
+          path: nim-agents/nix-build.log
