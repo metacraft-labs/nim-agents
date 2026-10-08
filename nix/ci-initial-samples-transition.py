@@ -53,14 +53,14 @@ def directories(root, common, hooks):
 
 def git(tool, root, *args):
     return subprocess.check_output([str(tool), "--no-optional-locks", "-C", str(root), *args],
-                                    env=dict(os.environ, GIT_OPTIONAL_LOCKS="0"))
+                                      env=dict(os.environ, GIT_OPTIONAL_LOCKS="0"))
 
 
 def refuse_configuration(tool, root):
     for key in ["core.hooksPath", "init.templateDir"]:
         result = subprocess.run([str(tool), "--no-optional-locks", "-C", str(root),
                                   "config", "--get", key], stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL)
+                                  stderr=subprocess.DEVNULL)
         require(result.returncode == 1, "Configured Git authority refused: " + key)
 
 
@@ -119,7 +119,88 @@ def tree_inventory(root):
     return result
 
 
+NATIVE_PS_AUTHORITY = None
+
+
+def verify_native_ps_authority():
+    if NATIVE_PS_AUTHORITY is not None:
+        image = Path("/bin/ps").resolve(strict=True)
+        require({"path": str(image), "identity": regular(image)} == NATIVE_PS_AUTHORITY,
+                "Native metadata principal changed across transition")
+
+
+def native_ps(arguments, allow_missing=False):
+    global NATIVE_PS_AUTHORITY
+    # Ordinary process metadata only; no argv/environment census or injection.
+    image = Path("/bin/ps").resolve(strict=True)
+    before = regular(image)
+    observed = {"path": str(image), "identity": before}
+    if NATIVE_PS_AUTHORITY is None:
+        NATIVE_PS_AUTHORITY = observed
+    require(observed == NATIVE_PS_AUTHORITY, "Native metadata principal changed across snapshots")
+    child = subprocess.Popen([str(image), *arguments], stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE,
+                              env=dict(os.environ, LC_ALL="C", TZ="UTC"))
+    try:
+        out, err = child.communicate()
+    finally:
+        if child.poll() is None:
+            child.wait()
+    require(regular(image) == before and Path("/bin/ps").resolve(strict=True) == image,
+            "Native metadata principal changed")
+    require(child.returncode == 0 or (allow_missing and child.returncode == 1 and not out and not err),
+            "Native metadata command failed")
+    verify_native_ps_authority()
+    require(not err and len(out) <= 8 * 1024 * 1024, "Unknown native metadata output")
+    return out.decode("ascii", errors="strict"), {"path": str(image), "identity": before}
+
+
+def darwin_session_members(sid):
+    live, unknown = [], []
+    try:
+        output, principal = native_ps(["-axo", "pid=,state="])
+    except (OSError, UnicodeError, RuntimeError) as error:
+        return [], [["native-ps", type(error).__name__]]
+    seen = set()
+    for line in output.splitlines():
+        try:
+            fields = line.split()
+            require(len(fields) == 2 and fields[0].isdigit() and int(fields[0]) > 0
+                    and fields[1][0] in "DIRSTUZ", "Malformed native process row")
+            pid = int(fields[0])
+            require(pid not in seen, "Duplicate native process row")
+            seen.add(pid)
+            actual_sid = os.getsid(pid)
+            if fields[1][0] != "Z" and actual_sid == sid:
+                live.append(str(pid))
+        except ProcessLookupError:
+            continue
+        except (OSError, ValueError, IndexError, RuntimeError) as error:
+            unknown.append([fields[0] if fields else "row", type(error).__name__])
+    return live, unknown
+
+
+def darwin_owned_start(child):
+    output, principal = native_ps(["-p", str(child.pid), "-o", "pid=,lstart="], allow_missing=True)
+    if not output.strip():
+        require(child.poll() is not None, "Missing live owned process identity")
+        return {"kind": "naturally-reaped-before-start-snapshot", "ps": principal}
+    rows = output.splitlines()
+    require(len(rows) == 1, "Ambiguous native start snapshot")
+    pid, start = rows[0].strip().split(maxsplit=1)
+    require(pid == str(child.pid) and len(start.split()) == 5,
+            "Malformed native owned start evidence")
+    try:
+        require(os.getsid(child.pid) == child.pid, "Foreign owned session identity")
+    except ProcessLookupError:
+        require(child.poll() is not None, "Unknown native owned process disappearance")
+    return {"kind": "ps-lstart-second-resolution", "value": start,
+            "authority": "owned-Popen-until-natural-wait", "ps": principal}
+
+
 def session_members(sid):
+    if sys.platform == "darwin":
+        return darwin_session_members(sid)
     live, unknown = [], []
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
@@ -146,10 +227,13 @@ def initialize(tool, templates, destination, creation_mask):
                                             GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null"),
                                   umask=creation_mask)
         record["pid_sid"] = child.pid
-        try:
-            record["birth"] = Path("/proc", str(child.pid), "stat").read_text().rsplit(")", 1)[1].split()[19]
-        except (FileNotFoundError, ProcessLookupError):
-            require(child.poll() is not None, "Missing live owned process identity")
+        if sys.platform == "darwin":
+            record["native_start_evidence"] = darwin_owned_start(child)
+        else:
+            try:
+                record["birth"] = Path("/proc", str(child.pid), "stat").read_text().rsplit(")", 1)[1].split()[19]
+            except (FileNotFoundError, ProcessLookupError):
+                require(child.poll() is not None, "Missing live owned process identity")
         out, err = child.communicate()
         record.update(exit=child.returncode, stdout_sha=digest(out), stderr_sha=digest(err))
         require(child.returncode == 0, "Actual Git initialization failed")
@@ -350,22 +434,25 @@ def apply(prepared, authority_sha):
     return result
 
 
-require(sys.platform.startswith("linux"), "Linux-only preparation capability")
-for name in REFUSED_ENV:
-    require(not os.environ.get(name), "Inherited authority refused: " + name)
-require(not any(k.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")) for k in os.environ),
-        "Indexed inherited configuration refused")
-require(len(ARGS) in [1, 2, 3], "Invalid preparation arguments")
-if len(ARGS) == 2 and ARGS[0] == "--prepare":
-    context, authority_sha = prepare(Path(ARGS[1]).absolute())
-    print(json.dumps({"success": True, "prepared": str(context), "authority_sha": authority_sha}))
-elif len(ARGS) == 3 and ARGS[0] == "--apply":
-    outcome = apply(Path(ARGS[1]).absolute(), ARGS[2])
-    print(json.dumps(outcome))
-    sys.exit(0 if outcome["success"] else 1)
-else:
-    require(len(ARGS) == 1, "Unknown preparation phase")
-    context, authority_sha = prepare(Path(ARGS[0]).absolute())
-    outcome = apply(context, authority_sha)
-    print(json.dumps(outcome))
-    sys.exit(0 if outcome["success"] else 1)
+try:
+    require(sys.platform.startswith("linux") or sys.platform == "darwin", "Unsupported preparation capability")
+    for name in REFUSED_ENV:
+        require(not os.environ.get(name), "Inherited authority refused: " + name)
+    require(not any(k.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")) for k in os.environ),
+            "Indexed inherited configuration refused")
+    require(len(ARGS) in [1, 2, 3], "Invalid preparation arguments")
+    if len(ARGS) == 2 and ARGS[0] == "--prepare":
+        context, authority_sha = prepare(Path(ARGS[1]).absolute())
+        print(json.dumps({"success": True, "prepared": str(context), "authority_sha": authority_sha}))
+    elif len(ARGS) == 3 and ARGS[0] == "--apply":
+        outcome = apply(Path(ARGS[1]).absolute(), ARGS[2])
+        print(json.dumps(outcome))
+        sys.exit(0 if outcome["success"] else 1)
+    else:
+        require(len(ARGS) == 1, "Unknown preparation phase")
+        context, authority_sha = prepare(Path(ARGS[0]).absolute())
+        outcome = apply(context, authority_sha)
+        print(json.dumps(outcome))
+        sys.exit(0 if outcome["success"] else 1)
+finally:
+    verify_native_ps_authority()

@@ -51,10 +51,20 @@ jobs:
             arch: arm64
             runner: [self-hosted, windows, arm64]
     runs-on: ${{ matrix.runner }}
+    env:
+      NIM_CI_NAMESPACE: declared-ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index }}
     steps:
+      - name: Claim exclusive declared CI workspace
+        if: runner.os != 'Windows'
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$NIM_CI_NAMESPACE" =~ ^declared-ci-[0-9]+-[0-9]+-[A-Za-z0-9_-]+-[0-9]+$ ]]
+          mkdir "$GITHUB_WORKSPACE/$NIM_CI_NAMESPACE"
       - uses: actions/checkout@v4
         with:
-          path: "${{ runner.os != 'Windows' && 'nim-agents-bootstrap' || '.' }}"
+          path: "${{ runner.os != 'Windows' && format('{0}/nim-agents-bootstrap', env.NIM_CI_NAMESPACE) || '.' }}"
 
       # Mint a GitHub App installation token via the CI Token Provider
       # app so the reprobuild flake/sibling steps can clone private
@@ -82,13 +92,13 @@ jobs:
           nix-github-token: ${{ steps.ci_token.outputs.token }}
       - name: Create declared Git exact-event Unix consumer
         if: runner.os != 'Windows'
-        working-directory: nim-agents-bootstrap
+        working-directory: ${{ env.NIM_CI_NAMESPACE }}/nim-agents-bootstrap
         shell: bash
         run: |
-          nix run .#prepare-ci-checkout -- "$PWD" "$GITHUB_WORKSPACE/nim-agents" "${{ github.sha }}" "$GITHUB_WORKSPACE" > "$GITHUB_WORKSPACE/declared-checkout-typed.json"
+          nix run .#prepare-ci-checkout -- "$PWD" "$GITHUB_WORKSPACE/$NIM_CI_NAMESPACE/nim-agents" "${{ github.sha }}" "$GITHUB_WORKSPACE/$NIM_CI_NAMESPACE" > "$GITHUB_WORKSPACE/$NIM_CI_NAMESPACE/declared-checkout-typed.json"
       - name: Capture and prepare exact Unix consumer Git authority
         if: runner.os != 'Windows'
-        working-directory: nim-agents
+        working-directory: ${{ env.NIM_CI_NAMESPACE }}/nim-agents
         shell: bash
         run: |
           mkdir -p .repro
@@ -102,14 +112,14 @@ jobs:
         uses: metacraft-labs/metacraft-github-actions/setup-dev-env@a28d769e6a7e94b4f223ee7686c5cb7c123bc202
         with:
           env-flavor: reprobuild
-          consumer-directory: "${{ runner.os != 'Windows' && 'nim-agents' || '.' }}"
-          workspace-directory: .
+          consumer-directory: "${{ runner.os != 'Windows' && format('{0}/nim-agents', env.NIM_CI_NAMESPACE) || '.' }}"
+          workspace-directory: "${{ runner.os != 'Windows' && env.NIM_CI_NAMESPACE || '.' }}"
           gh-token: ${{ steps.ci_token.outputs.token }}
           repro-from-source: ${{ runner.os != 'Windows' && 'true' || 'false' }}
           repro-build-pin: ${{ runner.os != 'Windows' && '76659f5730ecf698b1963c656494d2cb66eb256d' || 'dev' }}
 
       - name: Bind the installed Repro package Nix companion
-        working-directory: "${{ runner.os != 'Windows' && 'nim-agents' || '.' }}"
+        working-directory: "${{ runner.os != 'Windows' && format('{0}/nim-agents', env.NIM_CI_NAMESPACE) || '.' }}"
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -141,7 +151,7 @@ jobs:
 
       - name: Claim exclusive native Actions contract directory
         if: runner.os == 'Windows' || runner.os == 'macOS'
-        working-directory: "${{ runner.os != 'Windows' && 'nim-agents' || '.' }}"
+        working-directory: "${{ runner.os != 'Windows' && format('{0}/nim-agents', env.NIM_CI_NAMESPACE) || '.' }}"
         shell: bash
         run: python3 ci/qualify-actions-native-contracts.py prepare
 
@@ -151,12 +161,12 @@ jobs:
         with:
           repository: metacraft-labs/metacraft-github-actions
           ref: a28d769e6a7e94b4f223ee7686c5cb7c123bc202
-          path: .ci-actions-native-contracts
+          path: ${{ env.NIM_CI_NAMESPACE }}/.ci-actions-native-contracts
           persist-credentials: false
 
       - name: Execute original native Actions Git contracts
         if: runner.os == 'Windows' || runner.os == 'macOS'
-        working-directory: "${{ runner.os != 'Windows' && 'nim-agents' || '.' }}"
+        working-directory: "${{ runner.os != 'Windows' && format('{0}/nim-agents', env.NIM_CI_NAMESPACE) || '.' }}"
         shell: bash
         run: python3 ci/qualify-actions-native-contracts.py execute "${{ matrix.arch }}"
 
@@ -165,19 +175,19 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: actions-native-contracts-${{ matrix.os }}-${{ matrix.arch }}
-          path: ${{ runner.os != 'Windows' && 'nim-agents/' || '' }}.repro/actions-native-contracts/
+          path: ${{ runner.os != 'Windows' && format('{0}/nim-agents/', env.NIM_CI_NAMESPACE) || '' }}.repro/actions-native-contracts/
           include-hidden-files: true
           retention-days: 7
           if-no-files-found: warn
 
       - name: Acquire declared Windows x64 GCC profile
-        working-directory: "${{ runner.os != 'Windows' && 'nim-agents' || '.' }}"
+        working-directory: "${{ runner.os != 'Windows' && format('{0}/nim-agents', env.NIM_CI_NAMESPACE) || '.' }}"
         if: runner.os == 'Windows' && matrix.arch == 'x64'
         shell: pwsh
         run: pwsh -NoProfile -File ci/acquire-windows-gcc-profile.ps1
 
       - name: repro build
-        working-directory: "${{ runner.os != 'Windows' && 'nim-agents' || '.' }}"
+        working-directory: "${{ runner.os != 'Windows' && format('{0}/nim-agents', env.NIM_CI_NAMESPACE) || '.' }}"
         # Builds the conventional `build` collection declared in
         # `repro.nim`. Verifies the primary shipping artefact (the
         # recorder binary or extension) materialises through the
@@ -185,19 +195,19 @@ jobs:
         run: dev-exec repro build
 
       - name: repro test
-        working-directory: "${{ runner.os != 'Windows' && 'nim-agents' || '.' }}"
+        working-directory: "${{ runner.os != 'Windows' && format('{0}/nim-agents', env.NIM_CI_NAMESPACE) || '.' }}"
         # Materialises the `test` collection.
         run: dev-exec repro test
 
       - name: just build (cross-check)
-        working-directory: "${{ runner.os != 'Windows' && 'nim-agents' || '.' }}"
+        working-directory: "${{ runner.os != 'Windows' && format('{0}/nim-agents', env.NIM_CI_NAMESPACE) || '.' }}"
         # Re-runs the legacy `just build` path inside the same env so
         # we catch silent divergences between `repro build` outputs
         # and what the dev shell + Justfile produce today.
         run: dev-exec just build
 
       - name: just test (cross-check)
-        working-directory: "${{ runner.os != 'Windows' && 'nim-agents' || '.' }}"
+        working-directory: "${{ runner.os != 'Windows' && format('{0}/nim-agents', env.NIM_CI_NAMESPACE) || '.' }}"
         run: dev-exec just test
 
       # Diagnostics on failure. Three things below are load-bearing:
@@ -230,7 +240,7 @@ jobs:
       # (`cannot open file: results`, codetracer_ct_print.nim(24, 8)). These
       # artifacts are the only way to find out why any of it actually fails.
       - name: Diagnose Windows compiler files after original failure
-        working-directory: "${{ runner.os != 'Windows' && 'nim-agents' || '.' }}"
+        working-directory: "${{ runner.os != 'Windows' && format('{0}/nim-agents', env.NIM_CI_NAMESPACE) || '.' }}"
         if: failure() && runner.os == 'Windows'
         run: dev-exec pwsh -NoProfile -File ci/diagnose-windows-compiler.ps1 -Architecture "${{ matrix.arch }}"
 
@@ -240,13 +250,13 @@ jobs:
         with:
           name: reprobuild-logs-${{ matrix.os }}-${{ matrix.arch }}
           path: |
-            ${{ runner.os != 'Windows' && 'nim-agents/' || '' }}.repro/gcc-profile-acquisition-*.json
-            ${{ runner.os != 'Windows' && 'nim-agents/' || '' }}.repro/compiler-diagnostics/
-            ${{ runner.os != 'Windows' && 'nim-agents/' || '' }}.repro/build/*/build-failure-report.json
-            ${{ runner.os != 'Windows' && 'nim-agents/' || '' }}.repro/build/*/build-engine-cache/actions/
-            declared-checkout-typed.json
-            nim-agents/.repro/ci-git-authority/
-            nim-agents/.repro/ci-sample-transition.json
+            ${{ runner.os != 'Windows' && format('{0}/nim-agents/', env.NIM_CI_NAMESPACE) || '' }}.repro/gcc-profile-acquisition-*.json
+            ${{ runner.os != 'Windows' && format('{0}/nim-agents/', env.NIM_CI_NAMESPACE) || '' }}.repro/compiler-diagnostics/
+            ${{ runner.os != 'Windows' && format('{0}/nim-agents/', env.NIM_CI_NAMESPACE) || '' }}.repro/build/*/build-failure-report.json
+            ${{ runner.os != 'Windows' && format('{0}/nim-agents/', env.NIM_CI_NAMESPACE) || '' }}.repro/build/*/build-engine-cache/actions/
+            ${{ env.NIM_CI_NAMESPACE }}/declared-checkout-typed.json
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-sample-transition.json
           include-hidden-files: true
           retention-days: 7
           if-no-files-found: warn

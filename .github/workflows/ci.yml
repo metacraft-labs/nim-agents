@@ -29,22 +29,32 @@ jobs:
             [self-hosted, macos, arm64],
           ]
     runs-on: ${{ matrix.runner }}
+    env:
+      NIM_CI_NAMESPACE: declared-ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index }}
     steps:
+      - name: Claim exclusive declared CI workspace
+        if: runner.os != 'Windows'
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$NIM_CI_NAMESPACE" =~ ^declared-ci-[0-9]+-[0-9]+-[A-Za-z0-9_-]+-[0-9]+$ ]]
+          mkdir "$GITHUB_WORKSPACE/$NIM_CI_NAMESPACE"
       - uses: actions/checkout@v4
         with:
-          path: nim-agents-bootstrap
+          path: ${{ env.NIM_CI_NAMESPACE }}/nim-agents-bootstrap
       - uses: actions/checkout@v4
         with:
           repository: metacraft-labs/nim-everywhere
-          path: nim-everywhere
+          path: ${{ env.NIM_CI_NAMESPACE }}/nim-everywhere
       - uses: actions/checkout@v4
         with:
           repository: metacraft-labs/nim-acp
-          path: nim-acp
+          path: ${{ env.NIM_CI_NAMESPACE }}/nim-acp
       - uses: actions/checkout@v4
         with:
           repository: metacraft-labs/nim-agent-harbor
-          path: nim-agent-harbor
+          path: ${{ env.NIM_CI_NAMESPACE }}/nim-agent-harbor
       - name: Setup Nix
         uses: metacraft-labs/devops-modules/.github/setup-nix@dev
         with:
@@ -52,11 +62,12 @@ jobs:
           substituters: ${{ vars.SUBSTITUTERS }}
           nix-github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Create declared Git exact-event checkout
-        working-directory: nim-agents-bootstrap
+        working-directory: ${{ env.NIM_CI_NAMESPACE }}/nim-agents-bootstrap
         shell: bash
         run: |
-          nix run .#prepare-ci-checkout -- "$PWD" "$GITHUB_WORKSPACE/nim-agents" "${{ github.sha }}" "$GITHUB_WORKSPACE" > "$GITHUB_WORKSPACE/declared-checkout-test.json"
+          nix run .#prepare-ci-checkout -- "$PWD" "$GITHUB_WORKSPACE/$NIM_CI_NAMESPACE/nim-agents" "${{ github.sha }}" "$GITHUB_WORKSPACE/$NIM_CI_NAMESPACE" > "$GITHUB_WORKSPACE/$NIM_CI_NAMESPACE/declared-checkout-test.json"
       - name: Capture initial checkout Git authority
+        working-directory: ${{ env.NIM_CI_NAMESPACE }}/nim-agents
         shell: bash
         run: |
           mkdir -p .repro
@@ -66,33 +77,35 @@ jobs:
       # failing command was reported as a passing job. `shell: bash` selects
       # `bash --noprofile --norc -eo pipefail`.
       - name: Prepare exact selected Git samples
+        working-directory: ${{ env.NIM_CI_NAMESPACE }}/nim-agents
         shell: bash
         run: GIT_OPTIONAL_LOCKS=0 nix run .#prepare-ci-hook-samples -- .repro/ci-git-authority > .repro/ci-sample-transition.json
       - run: nix develop --command just test 2>&1 | tee test.log
+        working-directory: ${{ env.NIM_CI_NAMESPACE }}/nim-agents
         shell: bash
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: test-log-${{ join(matrix.runner, '-') }}
-          path: nim-agents/test.log
+          path: ${{ env.NIM_CI_NAMESPACE }}/nim-agents/test.log
       - name: Preserve initial Git authority
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: initial-git-authority-test-${{ join(matrix.runner, '-') }}
           path: |
-            declared-checkout-test.json
-            nim-agents/.repro/ci-git-authority/*.tsv
-            nim-agents/.repro/ci-git-authority/*.sha256
-            nim-agents/.repro/ci-git-authority/git-image.txt
-            nim-agents/.repro/ci-git-authority/templates-source.txt
-            nim-agents/.repro/ci-git-authority/source-head.txt
-            nim-agents/.repro/ci-git-authority/creator-umask-before.txt
-            nim-agents/.repro/ci-git-authority/creator-umask-after.txt
-            nim-agents/.repro/ci-git-authority/caller-shared-policy.txt
-            nim-agents/.repro/ci-git-authority/probe-shared-policy.txt
-            nim-agents/.repro/ci-git-authority/result.txt
-            nim-agents/.repro/ci-sample-transition.json
+            ${{ env.NIM_CI_NAMESPACE }}/declared-checkout-test.json
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/*.tsv
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/*.sha256
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/git-image.txt
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/templates-source.txt
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/source-head.txt
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/creator-umask-before.txt
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/creator-umask-after.txt
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/caller-shared-policy.txt
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/probe-shared-policy.txt
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/result.txt
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-sample-transition.json
   lint:
     strategy:
       fail-fast: false
@@ -104,22 +117,32 @@ jobs:
             [self-hosted, macos, arm64],
           ]
     runs-on: ${{ matrix.runner }}
+    env:
+      NIM_CI_NAMESPACE: declared-ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index }}
     steps:
+      - name: Claim exclusive declared CI workspace
+        if: runner.os != 'Windows'
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$NIM_CI_NAMESPACE" =~ ^declared-ci-[0-9]+-[0-9]+-[A-Za-z0-9_-]+-[0-9]+$ ]]
+          mkdir "$GITHUB_WORKSPACE/$NIM_CI_NAMESPACE"
       - uses: actions/checkout@v4
         with:
-          path: nim-agents-bootstrap
+          path: ${{ env.NIM_CI_NAMESPACE }}/nim-agents-bootstrap
       - uses: actions/checkout@v4
         with:
           repository: metacraft-labs/nim-everywhere
-          path: nim-everywhere
+          path: ${{ env.NIM_CI_NAMESPACE }}/nim-everywhere
       - uses: actions/checkout@v4
         with:
           repository: metacraft-labs/nim-acp
-          path: nim-acp
+          path: ${{ env.NIM_CI_NAMESPACE }}/nim-acp
       - uses: actions/checkout@v4
         with:
           repository: metacraft-labs/nim-agent-harbor
-          path: nim-agent-harbor
+          path: ${{ env.NIM_CI_NAMESPACE }}/nim-agent-harbor
       - name: Setup Nix
         uses: metacraft-labs/devops-modules/.github/setup-nix@dev
         with:
@@ -127,44 +150,47 @@ jobs:
           substituters: ${{ vars.SUBSTITUTERS }}
           nix-github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Create declared Git exact-event checkout
-        working-directory: nim-agents-bootstrap
+        working-directory: ${{ env.NIM_CI_NAMESPACE }}/nim-agents-bootstrap
         shell: bash
         run: |
-          nix run .#prepare-ci-checkout -- "$PWD" "$GITHUB_WORKSPACE/nim-agents" "${{ github.sha }}" "$GITHUB_WORKSPACE" > "$GITHUB_WORKSPACE/declared-checkout-lint.json"
+          nix run .#prepare-ci-checkout -- "$PWD" "$GITHUB_WORKSPACE/$NIM_CI_NAMESPACE/nim-agents" "${{ github.sha }}" "$GITHUB_WORKSPACE/$NIM_CI_NAMESPACE" > "$GITHUB_WORKSPACE/$NIM_CI_NAMESPACE/declared-checkout-lint.json"
       - name: Capture initial checkout Git authority
+        working-directory: ${{ env.NIM_CI_NAMESPACE }}/nim-agents
         shell: bash
         run: |
           mkdir -p .repro
           nix run .#capture-ci-checkout-authority -- .repro/ci-git-authority
       # See the note on the first tee'd step: without pipefail, `| tee` masks failure.
       - name: Prepare exact selected Git samples
+        working-directory: ${{ env.NIM_CI_NAMESPACE }}/nim-agents
         shell: bash
         run: GIT_OPTIONAL_LOCKS=0 nix run .#prepare-ci-hook-samples -- .repro/ci-git-authority > .repro/ci-sample-transition.json
       - run: nix develop --command just lint 2>&1 | tee lint.log
+        working-directory: ${{ env.NIM_CI_NAMESPACE }}/nim-agents
         shell: bash
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: lint-log-${{ join(matrix.runner, '-') }}
-          path: nim-agents/lint.log
+          path: ${{ env.NIM_CI_NAMESPACE }}/nim-agents/lint.log
       - name: Preserve initial Git authority
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: initial-git-authority-lint-${{ join(matrix.runner, '-') }}
           path: |
-            declared-checkout-lint.json
-            nim-agents/.repro/ci-git-authority/*.tsv
-            nim-agents/.repro/ci-git-authority/*.sha256
-            nim-agents/.repro/ci-git-authority/git-image.txt
-            nim-agents/.repro/ci-git-authority/templates-source.txt
-            nim-agents/.repro/ci-git-authority/source-head.txt
-            nim-agents/.repro/ci-git-authority/creator-umask-before.txt
-            nim-agents/.repro/ci-git-authority/creator-umask-after.txt
-            nim-agents/.repro/ci-git-authority/caller-shared-policy.txt
-            nim-agents/.repro/ci-git-authority/probe-shared-policy.txt
-            nim-agents/.repro/ci-git-authority/result.txt
-            nim-agents/.repro/ci-sample-transition.json
+            ${{ env.NIM_CI_NAMESPACE }}/declared-checkout-lint.json
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/*.tsv
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/*.sha256
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/git-image.txt
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/templates-source.txt
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/source-head.txt
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/creator-umask-before.txt
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/creator-umask-after.txt
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/caller-shared-policy.txt
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/probe-shared-policy.txt
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/result.txt
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-sample-transition.json
   nix-build:
     strategy:
       fail-fast: false

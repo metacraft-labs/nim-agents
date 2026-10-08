@@ -4,12 +4,16 @@ is application diagnostics. A recorded component verdict never substitutes the
 consumer product's original tests or complete promotion gates.
 """
 from pathlib import Path
-import os, sys, stat, json, hashlib, subprocess, shutil, time, platform
+import os, sys, stat, json, hashlib, subprocess, shutil, time, platform, re
 PIN = 'a28d769e6a7e94b4f223ee7686c5cb7c123bc202'
 NAME = '.ci-actions-native-contracts'
 ROOT = Path(os.environ['GITHUB_WORKSPACE']).absolute()
 CONSUMER = Path.cwd().absolute()
-TARGET = ROOT / NAME
+NAMESPACE = os.environ['NIM_CI_NAMESPACE']
+if not re.fullmatch(r'declared-ci-[0-9]+-[0-9]+-[A-Za-z0-9_-]+-[0-9]+', NAMESPACE):
+    raise RuntimeError('Foreign task namespace')
+TASK_ROOT = ROOT / NAMESPACE
+TARGET = TASK_ROOT / NAME
 RECEIPTS = CONSUMER / '.repro' / 'actions-native-contracts'
 def identity(p):
     p = Path(p); s = p.lstat()
@@ -91,14 +95,19 @@ mkdir(CONSUMER / '.repro'); mkdir(RECEIPTS)
 CLAIM = RECEIPTS / 'claim.json'
 if sys.argv[1:] == ['prepare']:
     # Atomic mkdir refuses existing/dangling/raced destination, without deletion.
+    if sys.platform == 'win32':
+        TASK_ROOT.mkdir()
+    elif CONSUMER.parent != TASK_ROOT:
+        raise RuntimeError('Consumer is not in the declared task workspace')
+    directory(TASK_ROOT)
     TARGET.mkdir()
-    claim = {'workspace': ROOT_AUTH, 'consumer': CONSUMER_AUTH, 'target': directory(TARGET), 'controller': SELF}
+    claim = {'workspace': ROOT_AUTH, 'consumer': CONSUMER_AUTH, 'taskWorkspace': directory(TASK_ROOT), 'target': directory(TARGET), 'controller': SELF}
     with CLAIM.open('x') as f: json.dump(claim, f, indent=2)
     raise SystemExit(0)
 if len(sys.argv) != 3 or sys.argv[1] != 'execute' or sys.argv[2] not in ['x64', 'arm64']:
     raise RuntimeError('Invalid native phase or declared architecture')
 claim = json.loads(CLAIM.read_text())
-if claim != {'workspace': ROOT_AUTH, 'consumer': CONSUMER_AUTH, 'target': directory(TARGET), 'controller': SELF}:
+if claim != {'workspace': ROOT_AUTH, 'consumer': CONSUMER_AUTH, 'taskWorkspace': directory(TASK_ROOT), 'target': directory(TARGET), 'controller': SELF}:
     raise RuntimeError('Changed native directory or controller authority')
 TOOLS = {n: tool(n) for n in ['bash', 'git', 'python3']}
 TOOLS['python-executable'] = tool(sys.executable)

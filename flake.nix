@@ -150,7 +150,7 @@
         in
         {
           checks.pre-commit = preCommit;
-          apps = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          apps = {
             capture-ci-checkout-authority = {
               type = "app";
               program = toString (
