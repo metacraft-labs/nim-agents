@@ -112,6 +112,11 @@ jobs:
           "$companion" --help
           echo "REPROBUILD_NIX_DAEMON_BIN=$companion" >> "$GITHUB_ENV"
 
+      - name: Acquire declared Windows x64 GCC profile
+        if: runner.os == 'Windows' && matrix.arch == 'x64'
+        shell: pwsh
+        run: pwsh -NoProfile -File ci/acquire-windows-gcc-profile.ps1
+
       - name: repro build
         # Builds the conventional `build` collection declared in
         # `repro.nim`. Verifies the primary shipping artefact (the
@@ -171,6 +176,7 @@ jobs:
         with:
           name: reprobuild-logs-${{ matrix.os }}-${{ matrix.arch }}
           path: |
+            .repro/gcc-profile-acquisition-*.json
             .repro/compiler-diagnostics/
             .repro/build/*/build-failure-report.json
             .repro/build/*/build-engine-cache/actions/
