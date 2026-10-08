@@ -53,6 +53,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: "${{ runner.os != 'Windows' && 'nim-agents-bootstrap' || '.' }}"
 
       # Mint a GitHub App installation token via the CI Token Provider
       # app so the reprobuild flake/sibling steps can clone private
@@ -71,18 +73,43 @@ jobs:
           private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
           owner: metacraft-labs
 
+      - name: Setup Nix for the declared Unix checkout
+        if: runner.os != 'Windows'
+        uses: metacraft-labs/devops-modules/.github/setup-nix@49907a0aeee73817a08b02e82fb8d31a5ed8f364
+        with:
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          substituters: ${{ vars.SUBSTITUTERS }}
+          nix-github-token: ${{ steps.ci_token.outputs.token }}
+      - name: Create declared Git exact-event Unix consumer
+        if: runner.os != 'Windows'
+        working-directory: nim-agents-bootstrap
+        shell: bash
+        run: |
+          nix run .#prepare-ci-checkout -- "$PWD" "$GITHUB_WORKSPACE/nim-agents" "${{ github.sha }}" "$GITHUB_WORKSPACE" > "$GITHUB_WORKSPACE/declared-checkout-typed.json"
+      - name: Capture and prepare exact Unix consumer Git authority
+        if: runner.os != 'Windows'
+        working-directory: nim-agents
+        shell: bash
+        run: |
+          mkdir -p .repro
+          nix run .#capture-ci-checkout-authority -- .repro/ci-git-authority
+          GIT_OPTIONAL_LOCKS=0 nix run .#prepare-ci-hook-samples -- .repro/ci-git-authority > .repro/ci-sample-transition.json
+
       - name: Setup dev env (reprobuild flavor)
         # setup-dev-env clones the siblings listed in .github/sibling-repos
         # (codetracer-trace-format, codetracer-trace-format-nim) at the
         # workspace-lock-pinned revisions before materialising the env.
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@142b12da267e48d7322960aa77ec33d7761f9082
         with:
           env-flavor: reprobuild
+          consumer-directory: "${{ runner.os != 'Windows' && 'nim-agents' || '.' }}"
+          workspace-directory: .
           gh-token: ${{ steps.ci_token.outputs.token }}
           repro-from-source: ${{ runner.os != 'Windows' && 'true' || 'false' }}
           repro-build-pin: ${{ runner.os != 'Windows' && '76659f5730ecf698b1963c656494d2cb66eb256d' || 'dev' }}
 
       - name: Bind the installed Repro package Nix companion
+        working-directory: "${{ runner.os != 'Windows' && 'nim-agents' || '.' }}"
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -113,11 +140,13 @@ jobs:
           echo "REPROBUILD_NIX_DAEMON_BIN=$companion" >> "$GITHUB_ENV"
 
       - name: Acquire declared Windows x64 GCC profile
+        working-directory: "${{ runner.os != 'Windows' && 'nim-agents' || '.' }}"
         if: runner.os == 'Windows' && matrix.arch == 'x64'
         shell: pwsh
         run: pwsh -NoProfile -File ci/acquire-windows-gcc-profile.ps1
 
       - name: repro build
+        working-directory: "${{ runner.os != 'Windows' && 'nim-agents' || '.' }}"
         # Builds the conventional `build` collection declared in
         # `repro.nim`. Verifies the primary shipping artefact (the
         # recorder binary or extension) materialises through the
@@ -125,16 +154,19 @@ jobs:
         run: dev-exec repro build
 
       - name: repro test
+        working-directory: "${{ runner.os != 'Windows' && 'nim-agents' || '.' }}"
         # Materialises the `test` collection.
         run: dev-exec repro test
 
       - name: just build (cross-check)
+        working-directory: "${{ runner.os != 'Windows' && 'nim-agents' || '.' }}"
         # Re-runs the legacy `just build` path inside the same env so
         # we catch silent divergences between `repro build` outputs
         # and what the dev shell + Justfile produce today.
         run: dev-exec just build
 
       - name: just test (cross-check)
+        working-directory: "${{ runner.os != 'Windows' && 'nim-agents' || '.' }}"
         run: dev-exec just test
 
       # Diagnostics on failure. Three things below are load-bearing:
@@ -167,6 +199,7 @@ jobs:
       # (`cannot open file: results`, codetracer_ct_print.nim(24, 8)). These
       # artifacts are the only way to find out why any of it actually fails.
       - name: Diagnose Windows compiler files after original failure
+        working-directory: "${{ runner.os != 'Windows' && 'nim-agents' || '.' }}"
         if: failure() && runner.os == 'Windows'
         run: dev-exec pwsh -NoProfile -File ci/diagnose-windows-compiler.ps1 -Architecture "${{ matrix.arch }}"
 
@@ -176,10 +209,13 @@ jobs:
         with:
           name: reprobuild-logs-${{ matrix.os }}-${{ matrix.arch }}
           path: |
-            .repro/gcc-profile-acquisition-*.json
-            .repro/compiler-diagnostics/
-            .repro/build/*/build-failure-report.json
-            .repro/build/*/build-engine-cache/actions/
+            ${{ runner.os != 'Windows' && 'nim-agents/' || '' }}.repro/gcc-profile-acquisition-*.json
+            ${{ runner.os != 'Windows' && 'nim-agents/' || '' }}.repro/compiler-diagnostics/
+            ${{ runner.os != 'Windows' && 'nim-agents/' || '' }}.repro/build/*/build-failure-report.json
+            ${{ runner.os != 'Windows' && 'nim-agents/' || '' }}.repro/build/*/build-engine-cache/actions/
+            declared-checkout-typed.json
+            nim-agents/.repro/ci-git-authority/
+            nim-agents/.repro/ci-sample-transition.json
           include-hidden-files: true
           retention-days: 7
           if-no-files-found: warn
