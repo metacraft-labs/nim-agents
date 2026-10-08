@@ -79,6 +79,8 @@ jobs:
         with:
           env-flavor: reprobuild
           gh-token: ${{ steps.ci_token.outputs.token }}
+          repro-from-source: ${{ runner.os == 'Linux' && 'true' || 'false' }}
+          repro-build-pin: ${{ runner.os == 'Linux' && '76659f5730ecf698b1963c656494d2cb66eb256d' || 'dev' }}
 
       - name: Bind the installed Repro package Nix companion
         if: runner.os == 'Linux'
