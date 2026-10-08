@@ -139,6 +139,37 @@ jobs:
           "$companion" --help
           echo "REPROBUILD_NIX_DAEMON_BIN=$companion" >> "$GITHUB_ENV"
 
+      - name: Claim exclusive native Actions contract directory
+        if: runner.os == 'Windows' || runner.os == 'macOS'
+        working-directory: "${{ runner.os != 'Windows' && 'nim-agents' || '.' }}"
+        shell: bash
+        run: python3 ci/qualify-actions-native-contracts.py prepare
+
+      - name: Check out published Actions native contract source
+        if: runner.os == 'Windows' || runner.os == 'macOS'
+        uses: actions/checkout@v4
+        with:
+          repository: metacraft-labs/metacraft-github-actions
+          ref: a28d769e6a7e94b4f223ee7686c5cb7c123bc202
+          path: .ci-actions-native-contracts
+          persist-credentials: false
+
+      - name: Execute original native Actions Git contracts
+        if: runner.os == 'Windows' || runner.os == 'macOS'
+        working-directory: "${{ runner.os != 'Windows' && 'nim-agents' || '.' }}"
+        shell: bash
+        run: python3 ci/qualify-actions-native-contracts.py execute "${{ matrix.arch }}"
+
+      - name: Retain native Actions contract receipts
+        if: always() && (runner.os == 'Windows' || runner.os == 'macOS')
+        uses: actions/upload-artifact@v4
+        with:
+          name: actions-native-contracts-${{ matrix.os }}-${{ matrix.arch }}
+          path: ${{ runner.os != 'Windows' && 'nim-agents/' || '' }}.repro/actions-native-contracts/
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: warn
+
       - name: Acquire declared Windows x64 GCC profile
         working-directory: "${{ runner.os != 'Windows' && 'nim-agents' || '.' }}"
         if: runner.os == 'Windows' && matrix.arch == 'x64'
