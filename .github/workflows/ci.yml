@@ -83,6 +83,10 @@ jobs:
             nim-agents/.repro/ci-git-authority/git-image.txt
             nim-agents/.repro/ci-git-authority/templates-source.txt
             nim-agents/.repro/ci-git-authority/source-head.txt
+            nim-agents/.repro/ci-git-authority/creator-umask-before.txt
+            nim-agents/.repro/ci-git-authority/creator-umask-after.txt
+            nim-agents/.repro/ci-git-authority/caller-shared-policy.txt
+            nim-agents/.repro/ci-git-authority/probe-shared-policy.txt
             nim-agents/.repro/ci-git-authority/result.txt
             nim-agents/.repro/ci-sample-transition.json
   lint:
@@ -147,6 +151,10 @@ jobs:
             nim-agents/.repro/ci-git-authority/git-image.txt
             nim-agents/.repro/ci-git-authority/templates-source.txt
             nim-agents/.repro/ci-git-authority/source-head.txt
+            nim-agents/.repro/ci-git-authority/creator-umask-before.txt
+            nim-agents/.repro/ci-git-authority/creator-umask-after.txt
+            nim-agents/.repro/ci-git-authority/caller-shared-policy.txt
+            nim-agents/.repro/ci-git-authority/probe-shared-policy.txt
             nim-agents/.repro/ci-git-authority/result.txt
             nim-agents/.repro/ci-sample-transition.json
   nix-build:

@@ -8,7 +8,8 @@ test -z "${GLOBIGNORE-}"
 receipt=$1
 test ! -e "$receipt"
 mkdir -m 700 "$receipt"
-test -z "${GIT_DIR-}${GIT_WORK_TREE-}${GIT_COMMON_DIR-}${GIT_TEMPLATE_DIR-}${GIT_CONFIG_PARAMETERS-}${GIT_CONFIG_COUNT-}${GIT_INDEX_FILE-}${GIT_OBJECT_DIRECTORY-}${GIT_ALTERNATE_OBJECT_DIRECTORIES-}${NIM_AGENTS_NATIVE_DIRECTORY_AUTHORITY-}"
+test -z "${GIT_CONFIG-}${GIT_DIR-}${GIT_WORK_TREE-}${GIT_COMMON_DIR-}${GIT_TEMPLATE_DIR-}${GIT_CONFIG_PARAMETERS-}${GIT_CONFIG_COUNT-}${GIT_INDEX_FILE-}${GIT_OBJECT_DIRECTORY-}${GIT_ALTERNATE_OBJECT_DIRECTORIES-}${NIM_AGENTS_NATIVE_DIRECTORY_AUTHORITY-}"
+test -z "${!GIT_CONFIG_KEY_@}${!GIT_CONFIG_VALUE_@}"
 git_exe=$(command -v git)
 git_real=$(realpath "$git_exe")
 test -f "$git_real" && test -x "$git_real"
@@ -21,6 +22,7 @@ case "$git_real" in
   *) echo 'unqualified checkout Git prefix' >&2; exit 1 ;;
 esac
 templates="$git_root/share/git-core/templates"
+test ! -e "$templates/config" && test ! -L "$templates/config"
 git_body_before=$(sha256sum "$git_real")
 test -d "$templates/hooks" && test ! -L "$templates" && test ! -L "$templates/hooks"
 # An inherited template selector is outside this source-qualified authority.
@@ -88,7 +90,24 @@ record_inventory() {
   done | LC_ALL=C sort
 }
 record_inventory "$templates/hooks" > "$receipt/template-source-before.tsv"
-git init --template="$templates" "$receipt/probe" > "$receipt/probe.stdout" 2> "$receipt/probe.stderr"
+# Genuine constructor fixtures use a child-only no-system/no-global configuration.
+# Caller configuration and permission policy are preserved.
+# Record actual creation policy before the genuine initialization, without changing it.
+umask > "$receipt/creator-umask-before.txt"
+if git config --get-all core.sharedRepository > "$receipt/caller-shared-policy.txt"; then
+  :
+else
+  test "$?" = 1
+fi
+GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git init --template="$templates" "$receipt/probe" > "$receipt/probe.stdout" 2> "$receipt/probe.stderr"
+umask > "$receipt/creator-umask-after.txt"
+test "$(sha256sum < "$receipt/creator-umask-before.txt")" = "$(sha256sum < "$receipt/creator-umask-after.txt")"
+# The original repository's local policy is not the fresh probe's effective policy.
+if GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$receipt/probe" config --show-origin --show-scope --get-all core.sharedRepository > "$receipt/probe-shared-policy.txt"; then
+  :
+else
+  test "$?" = 1
+fi
 record_inventory "$hooks" > "$receipt/initialized-before.tsv"
 record_inventory "$receipt/probe/.git/hooks" > "$receipt/actual-template-initialized.tsv"
 test "$(sha256sum < "$receipt/initialized-before.tsv")" = "$(sha256sum < "$receipt/actual-template-initialized.tsv")"

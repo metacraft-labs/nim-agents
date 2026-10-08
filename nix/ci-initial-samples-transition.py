@@ -19,7 +19,7 @@ CAPTURE_SOURCE_SHA = sys.argv[2]
 FLAKE_SOURCE_SHA = sys.argv[3]
 ARGS = sys.argv[4:]
 REFUSED_ENV = (
-    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_TEMPLATE_DIR",
+    "GIT_CONFIG", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_TEMPLATE_DIR",
     "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_INDEX_FILE",
     "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "NIM_AGENTS_NATIVE_DIRECTORY_AUTHORITY",
@@ -135,12 +135,16 @@ def session_members(sid):
     return live, unknown
 
 
-def initialize(tool, templates, destination):
-    record = {"argv": [str(tool), "init", "--template=" + str(templates), str(destination)]}
+def initialize(tool, templates, destination, creation_mask):
+    record = {"argv": [str(tool), "init", "--template=" + str(templates), str(destination)],
+              "creation_mask": format(creation_mask, "04o"),
+              "child_config": {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}}
     child = None
     try:
         child = subprocess.Popen(record["argv"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                  start_new_session=True, env=dict(os.environ, GIT_OPTIONAL_LOCKS="0"))
+                                  start_new_session=True, env=dict(os.environ, GIT_OPTIONAL_LOCKS="0",
+                                            GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null"),
+                                  umask=creation_mask)
         record["pid_sid"] = child.pid
         try:
             record["birth"] = Path("/proc", str(child.pid), "stat").read_text().rsplit(")", 1)[1].split()[19]
@@ -178,6 +182,11 @@ def read_sample_table(path):
     return result
 
 
+def refuse_template_configuration(templates):
+    require(not (templates / "config").exists() and not (templates / "config").is_symlink(),
+            "Template configuration requires separate authority")
+
+
 def prepare(receipt):
     require(receipt.is_absolute() and not receipt.is_symlink(), "Foreign receipt path refused")
     root = Path((receipt / "own-root.txt").read_text().strip())
@@ -205,6 +214,15 @@ def prepare(receipt):
     require(recorded_dirs == initial["directories"], "Captured directory authority changed")
     require(initial["hooks"] == read_sample_table(receipt / "initialized-before.tsv"),
             "Captured initial sample inventory changed")
+    before_mask = (receipt / "creator-umask-before.txt").read_bytes()
+    require(before_mask == (receipt / "creator-umask-after.txt").read_bytes(), "Creator permission policy changed")
+    mask_text = before_mask.decode("ascii")
+    require(len(mask_text) == 5 and mask_text[-1] == "\n" and all(c in "01234567" for c in mask_text[:4]),
+            "Malformed creator permission policy")
+    creator_mask = int(mask_text[:4], 8)
+    require(creator_mask <= 0o777 and (0o777 & ~creator_mask & 0o700) == 0o700,
+            "Creator owner permission policy refused")
+    require((receipt / "probe-shared-policy.txt").read_bytes() == b"", "Shared creator policy requires separate authority")
     prepared = Path(tempfile.mkdtemp(prefix="ci-samples-prepared-", dir=receipt.parent))
     proof = {"root": str(root), "receipt": str(receipt), "initial": initial,
               "receipt_inventory": tree_inventory(receipt), "commands": [],
@@ -218,12 +236,14 @@ def prepare(receipt):
         proof["principals"][str(tool)] = regular(tool)
         templates = tool.parent.parent / "share/git-core/templates"
         require(not templates.is_symlink() and not (templates / "hooks").is_symlink(), "Unknown template path")
+        refuse_template_configuration(templates)
         raw_before = hook_inventory(templates / "hooks")
-        proof["commands"].append(initialize(tool, templates, prepared / label))
+        creation_mask = creator_mask if label == "creator" else 0o022
+        proof["commands"].append(initialize(tool, templates, prepared / label, creation_mask))
         materialized = hook_inventory(prepared / label / ".git/hooks")
         require(len(materialized) == 14 and set(materialized) == set(raw_before), "Incomplete constructor inventory")
         require(all(materialized[n]["sha"] == raw_before[n]["sha"] and
-                    materialized[n]["mode"] == raw_before[n]["mode"] | stat.S_IWUSR
+                    materialized[n]["mode"] == ((0o777 if raw_before[n]["mode"] & 0o111 else 0o666) & ~creation_mask)
                     for n in raw_before), "Unexpected Git materialization body/mode")
         require(hook_inventory(templates / "hooks") == raw_before, "Template source changed across initialization")
         proof[label] = materialized
@@ -333,6 +353,8 @@ def apply(prepared, authority_sha):
 require(sys.platform.startswith("linux"), "Linux-only preparation capability")
 for name in REFUSED_ENV:
     require(not os.environ.get(name), "Inherited authority refused: " + name)
+require(not any(k.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")) for k in os.environ),
+        "Indexed inherited configuration refused")
 require(len(ARGS) in [1, 2, 3], "Invalid preparation arguments")
 if len(ARGS) == 2 and ARGS[0] == "--prepare":
     context, authority_sha = prepare(Path(ARGS[1]).absolute())
