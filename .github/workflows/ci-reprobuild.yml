@@ -99,7 +99,7 @@ jobs:
         # setup-dev-env clones the siblings listed in .github/sibling-repos
         # (codetracer-trace-format, codetracer-trace-format-nim) at the
         # workspace-lock-pinned revisions before materialising the env.
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@142b12da267e48d7322960aa77ec33d7761f9082
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@a28d769e6a7e94b4f223ee7686c5cb7c123bc202
         with:
           env-flavor: reprobuild
           consumer-directory: "${{ runner.os != 'Windows' && 'nim-agents' || '.' }}"
