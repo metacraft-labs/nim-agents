@@ -109,7 +109,7 @@ jobs:
         # setup-dev-env clones the siblings listed in .github/sibling-repos
         # (codetracer-trace-format, codetracer-trace-format-nim) at the
         # workspace-lock-pinned revisions before materialising the env.
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@d2b913483d3849337f0282b623bf7e119ee68cbd
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@bb62bd138c8074a8d9654724e6951488486b60a1
         with:
           env-flavor: reprobuild
           consumer-directory: "${{ runner.os != 'Windows' && format('{0}/nim-agents', env.NIM_CI_NAMESPACE) || '.' }}"
@@ -173,7 +173,7 @@ jobs:
           GIT_CONFIG_PARAMETERS: ${{ env.GIT_CONFIG_PARAMETERS != '' && format('{0} ', env.GIT_CONFIG_PARAMETERS) || '' }}'core.autocrlf'='false' 'core.eol'='lf' 'core.attributesfile'=''
         with:
           repository: metacraft-labs/metacraft-github-actions
-          ref: d2b913483d3849337f0282b623bf7e119ee68cbd
+          ref: bb62bd138c8074a8d9654724e6951488486b60a1
           path: ${{ env.NIM_CI_NAMESPACE }}/.ci-actions-native-contracts
           persist-credentials: false
 
