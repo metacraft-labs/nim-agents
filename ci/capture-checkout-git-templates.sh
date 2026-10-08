@@ -98,7 +98,7 @@ record_inventory "$templates/hooks" > "$receipt/actual-template-source.tsv"
 test "$(sha256sum < "$receipt/template-source-before.tsv")" = "$(sha256sum < "$receipt/actual-template-source.tsv")"
 test "$git_body_before" = "$(sha256sum "$git_real")"
 record_directories > "$receipt/directory-authority-after.tsv"
-cmp "$receipt/directory-authority.tsv" "$receipt/directory-authority-after.tsv"
+test "$(sha256sum < "$receipt/directory-authority.tsv")" = "$(sha256sum < "$receipt/directory-authority-after.tsv")"
 # Revalidate actual whole inventory after probe, before treating capture stable.
 record_inventory "$hooks" > "$receipt/initialized-after.tsv"
 test "$(sha256sum < "$receipt/initialized-before.tsv")" = "$(sha256sum < "$receipt/initialized-after.tsv")"
