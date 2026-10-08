@@ -145,7 +145,8 @@ def archive_entry(entry, seen):
 
 def package(key):
     contract = POLICY[key]; archive = OWNED / (key + '.zip')
-    with urllib.request.urlopen(contract['url']) as incoming, archive.open('xb') as out:
+    request = urllib.request.Request(contract['url'], headers={'User-Agent': 'metacraft-nim-runquota-bootstrap/1'})
+    with urllib.request.urlopen(request) as incoming, archive.open('xb') as out:
         shutil.copyfileobj(incoming, out)
     observed = archive_integrity(archive, contract)
     destination = OWNED / key; destination.mkdir(); hold(destination)
