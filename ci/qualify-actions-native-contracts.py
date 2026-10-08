@@ -5,7 +5,7 @@ consumer product's original tests or complete promotion gates.
 """
 from pathlib import Path
 import os, sys, stat, json, hashlib, subprocess, shutil, time, platform, re
-PIN = 'a28d769e6a7e94b4f223ee7686c5cb7c123bc202'
+PIN = '88c3fe823d276a4f7c8b6922ed21fb169fb596c1'
 NAME = '.ci-actions-native-contracts'
 ROOT = Path(os.environ['GITHUB_WORKSPACE']).absolute()
 CONSUMER = Path.cwd().absolute()
@@ -109,7 +109,7 @@ if len(sys.argv) != 3 or sys.argv[1] != 'execute' or sys.argv[2] not in ['x64', 
 claim = json.loads(CLAIM.read_text())
 if claim != {'workspace': ROOT_AUTH, 'consumer': CONSUMER_AUTH, 'taskWorkspace': directory(TASK_ROOT), 'target': directory(TARGET), 'controller': SELF}:
     raise RuntimeError('Changed native directory or controller authority')
-TOOLS = {n: tool(n) for n in ['bash', 'git', 'python3']}
+TOOLS = {n: tool(n) for n in (['bash', 'git'] if sys.platform == 'win32' else ['bash', 'git', 'python3'])}
 TOOLS['python-executable'] = tool(sys.executable)
 BEFORE = source()
 proof = {'scope': __doc__, 'platform': sys.platform, 'observedMachine': platform.machine(), 'declaredArchitecture': sys.argv[2], 'toolsBefore': TOOLS, 'sourceBefore': BEFORE, 'claim': claim, 'rows': [], 'success': False}
@@ -127,7 +127,7 @@ try:
             raise RuntimeError('Changed native source or tool before suite')
         out = RECEIPTS / (name + '.stdout'); err = RECEIPTS / (name + '.stderr')
         with out.open('xb') as stdout, err.open('xb') as stderr:
-            child = subprocess.Popen([TOOLS['bash']['resolved'], 'git-auth/' + name], cwd=TARGET, stdout=stdout, stderr=stderr)
+            child = subprocess.Popen([TOOLS['bash']['resolved'], 'git-auth/' + name], cwd=TARGET, stdout=stdout, stderr=stderr, env=dict(os.environ, MCL_TEST_PYTHON_EXECUTABLE=Path(TOOLS['python-executable']['resolved']).as_posix(), PYTHONDONTWRITEBYTECODE='1'))
             row = {'name': name, 'pid': child.pid, 'scope': 'Owned direct-child natural wait; no descendant census claim'}
             try: pass
             finally: row['exit'] = child.wait()

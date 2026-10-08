@@ -109,7 +109,7 @@ jobs:
         # setup-dev-env clones the siblings listed in .github/sibling-repos
         # (codetracer-trace-format, codetracer-trace-format-nim) at the
         # workspace-lock-pinned revisions before materialising the env.
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@a28d769e6a7e94b4f223ee7686c5cb7c123bc202
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@88c3fe823d276a4f7c8b6922ed21fb169fb596c1
         with:
           env-flavor: reprobuild
           consumer-directory: "${{ runner.os != 'Windows' && format('{0}/nim-agents', env.NIM_CI_NAMESPACE) || '.' }}"
@@ -149,18 +149,29 @@ jobs:
           "$companion" --help
           echo "REPROBUILD_NIX_DAEMON_BIN=$companion" >> "$GITHUB_ENV"
 
+      - name: Acquire official native Windows Python for Actions contracts
+        if: runner.os == 'Windows'
+        working-directory: "."
+        shell: pwsh
+        run: pwsh -NoProfile -File ci/acquire-native-python.ps1 -Architecture "${{ matrix.arch }}"
+
       - name: Claim exclusive native Actions contract directory
         if: runner.os == 'Windows' || runner.os == 'macOS'
         working-directory: "${{ runner.os != 'Windows' && format('{0}/nim-agents', env.NIM_CI_NAMESPACE) || '.' }}"
         shell: bash
-        run: python3 ci/qualify-actions-native-contracts.py prepare
+        run: |
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            "$NIM_NATIVE_PYTHON" -B ci/qualify-actions-native-contracts.py prepare
+          else
+            python3 ci/qualify-actions-native-contracts.py prepare
+          fi
 
       - name: Check out published Actions native contract source
         if: runner.os == 'Windows' || runner.os == 'macOS'
         uses: actions/checkout@v4
         with:
           repository: metacraft-labs/metacraft-github-actions
-          ref: a28d769e6a7e94b4f223ee7686c5cb7c123bc202
+          ref: 88c3fe823d276a4f7c8b6922ed21fb169fb596c1
           path: ${{ env.NIM_CI_NAMESPACE }}/.ci-actions-native-contracts
           persist-credentials: false
 
@@ -168,14 +179,28 @@ jobs:
         if: runner.os == 'Windows' || runner.os == 'macOS'
         working-directory: "${{ runner.os != 'Windows' && format('{0}/nim-agents', env.NIM_CI_NAMESPACE) || '.' }}"
         shell: bash
-        run: python3 ci/qualify-actions-native-contracts.py execute "${{ matrix.arch }}"
+        run: |
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            "$NIM_NATIVE_PYTHON" -B ci/qualify-actions-native-contracts.py execute "${{ matrix.arch }}"
+          else
+            python3 ci/qualify-actions-native-contracts.py execute "${{ matrix.arch }}"
+          fi
+
+      - name: Remove only unchanged owned native Python runtime
+        if: always() && runner.os == 'Windows' && env.NIM_NATIVE_PYTHON_RECEIPT != ''
+        working-directory: "."
+        shell: pwsh
+        run: pwsh -NoProfile -File ci/cleanup-native-python.ps1
 
       - name: Retain native Actions contract receipts
         if: always() && (runner.os == 'Windows' || runner.os == 'macOS')
         uses: actions/upload-artifact@v4
         with:
           name: actions-native-contracts-${{ matrix.os }}-${{ matrix.arch }}
-          path: ${{ runner.os != 'Windows' && format('{0}/nim-agents/', env.NIM_CI_NAMESPACE) || '' }}.repro/actions-native-contracts/
+          path: |
+            ${{ runner.os != 'Windows' && format('{0}/nim-agents/', env.NIM_CI_NAMESPACE) || '' }}.repro/actions-native-contracts/
+            .repro/native-python-acquisition-*.json
+            .repro/native-python-cleanup-*.json
           include-hidden-files: true
           retention-days: 7
           if-no-files-found: warn
