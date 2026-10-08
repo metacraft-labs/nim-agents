@@ -191,6 +191,14 @@ jobs:
             "${REPROBUILD_BOOTSTRAP_PYTHON:?Missing declared SDK Python}" -B ci/qualify-actions-native-contracts.py execute "${{ matrix.arch }}"
           fi
 
+      - name: Build the matching released RunQuota prerequisite
+        if: runner.os == 'Windows' && matrix.arch == 'x64'
+        working-directory: "."
+        shell: bash
+        env:
+          NIM_RUNQUOTA_BOOTSTRAP_TOKEN: ${{ steps.ci_token.outputs.token }}
+        run: '"$NIM_NATIVE_PYTHON" -B ci/bootstrap-windows-runquota.py'
+
       - name: Remove only unchanged owned native Python runtime
         if: always() && runner.os == 'Windows' && env.NIM_NATIVE_PYTHON_RECEIPT != ''
         working-directory: "."
@@ -206,6 +214,9 @@ jobs:
             ${{ runner.os != 'Windows' && format('{0}/nim-agents/', env.NIM_CI_NAMESPACE) || '' }}.repro/actions-native-contracts/
             .repro/native-python-acquisition-*.json
             .repro/native-python-cleanup-*.json
+            .repro/runquota-bootstrap-*.json
+            ${{ runner.temp }}/native-runquota-*/*.stdout
+            ${{ runner.temp }}/native-runquota-*/*.stderr
           include-hidden-files: true
           retention-days: 7
           if-no-files-found: warn
