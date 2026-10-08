@@ -216,6 +216,9 @@ package nim_agents:
         paths = @["src"],
         actionId = "nim_agents.test_build." & stem,
         extraInputs = @["src", "nim_agents.nimble"])
+      when defined(linux):
+        # Bind the already-declared C backend to this exact typed compile.
+        appendRegisteredActionToolIdentityRefs(edge.action.id, ["gcc"])
       buildActions.add(edge.action)
       # ``registerImplicitName = false`` because the BUILD edge already owns
       # the binary basename as the implicit target name; the explicit

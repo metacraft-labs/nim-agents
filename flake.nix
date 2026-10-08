@@ -6,6 +6,8 @@
       url = "github:metacraft-labs/devops-modules/c8ef41d446e211892fe9775182b43d5d517554ac";
       flake = false;
     };
+    # Exact constructor authority for guarded native hook activation.
+    managed-hook-reprobuild.url = "github:metacraft-labs/reprobuild/76659f5730ecf698b1963c656494d2cb66eb256d";
     nixos-modules.url = "github:metacraft-labs/devops-modules";
     nixpkgs.follows = "nixos-modules/nixpkgs-unstable";
     flake-parts.follows = "nixos-modules/flake-parts";
@@ -130,7 +132,13 @@
           hookOwnershipGuard = ./nix/hook-ownership-guard.py;
           hookTransaction = ./nix/hook-transaction.py;
           actualNativeInstaller = pkgs.writeShellScript "nim-agents-native-hook-installer" preCommit.shellHook;
+          managedHookConstructor = inputs.managed-hook-reprobuild.packages.${system}.reprobuild;
           guardedHookInstall = ''
+            if [ -n "''${REPROBUILD_REPRO:-}" ] && [ "$REPROBUILD_REPRO" != "${managedHookConstructor}/bin/repro" ]; then
+              echo 'Foreign inherited managed constructor authority' >&2
+              exit 1
+            fi
+            export REPROBUILD_REPRO="${managedHookConstructor}/bin/repro"
             ${pkgs.python3}/bin/python3 ${hookTransaction} "$_own_repo_root" ${hookOwnershipGuard} ${expectedNativeHook} ${pkgs.git}/share/git-core/templates ${expectedLegacyNativeHook} ${preCommit.config.configFile} ${legacyPreCommit.config.configFile} ${actualNativeInstaller} ${pkgs.git}/bin/git ${pkgs.bash}/bin/bash >&2
             _nim_agents_hook_status=$?
             if [ "$_nim_agents_hook_status" -ne 0 ]; then
