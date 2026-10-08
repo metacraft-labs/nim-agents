@@ -170,7 +170,7 @@ jobs:
         if: runner.os == 'Windows' || runner.os == 'macOS'
         uses: actions/checkout@v4
         env:
-          GIT_CONFIG_PARAMETERS: ${{ env.GIT_CONFIG_PARAMETERS }} 'core.autocrlf'='false' 'core.eol'='lf' 'core.attributesfile'=''
+          GIT_CONFIG_PARAMETERS: ${{ env.GIT_CONFIG_PARAMETERS != '' && format('{0} ', env.GIT_CONFIG_PARAMETERS) || '' }}'core.autocrlf'='false' 'core.eol'='lf' 'core.attributesfile'=''
         with:
           repository: metacraft-labs/metacraft-github-actions
           ref: 88c3fe823d276a4f7c8b6922ed21fb169fb596c1
