@@ -104,13 +104,86 @@ if sys.argv[1:] == ['prepare']:
     claim = {'workspace': ROOT_AUTH, 'consumer': CONSUMER_AUTH, 'taskWorkspace': directory(TASK_ROOT), 'target': directory(TARGET), 'controller': SELF}
     with CLAIM.open('x') as f: json.dump(claim, f, indent=2)
     raise SystemExit(0)
-if len(sys.argv) != 3 or sys.argv[1] != 'execute' or sys.argv[2] not in ['x64', 'arm64']:
+if len(sys.argv) != 3 or sys.argv[1] not in ['checkout', 'execute'] or sys.argv[2] not in ['x64', 'arm64']:
     raise RuntimeError('Invalid native phase or declared architecture')
 claim = json.loads(CLAIM.read_text())
-if claim != {'workspace': ROOT_AUTH, 'consumer': CONSUMER_AUTH, 'taskWorkspace': directory(TASK_ROOT), 'target': directory(TARGET), 'controller': SELF}:
-    raise RuntimeError('Changed native directory or controller authority')
+def verify_claim():
+    if claim != {'workspace': directory(ROOT), 'consumer': directory(CONSUMER), 'taskWorkspace': directory(TASK_ROOT), 'target': directory(TARGET), 'controller': identity(Path(__file__).absolute())}:
+        raise RuntimeError('Changed native directory or controller authority')
+verify_claim()
 TOOLS = {n: tool(n) for n in ['bash', 'git']}
 TOOLS['python-executable'] = tool(sys.executable)
+if sys.argv[1] == 'checkout':
+    if any(TARGET.iterdir()): raise RuntimeError('Occupied claimed checkout')
+    env = dict(os.environ)
+    forbidden = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_TEMPLATE_DIR', 'GIT_CONFIG']
+    if any(k in env for k in forbidden): raise RuntimeError('Inherited checkout authority refused')
+    count = env.get('GIT_CONFIG_COUNT', '0')
+    if not re.fullmatch(r'0|[1-9][0-9]*', count): raise RuntimeError('Invalid command configuration count')
+    n = int(count)
+    indexed = {k for k in env if re.fullmatch(r'GIT_CONFIG_(KEY|VALUE)_[0-9]+', k)}
+    if indexed != {f'GIT_CONFIG_{role}_{i}' for i in range(n) for role in ['KEY', 'VALUE']}:
+        raise RuntimeError('Incomplete command configuration')
+    token = env.pop('NIM_NATIVE_CHECKOUT_TOKEN', '')
+    if not token or any(c in token for c in '\r\n'): raise RuntimeError('Missing checkout token')
+    import base64
+    key = 'http.https://github.com/metacraft-labs/.extraHeader'
+    value = 'AUTHORIZATION: basic ' + base64.b64encode(('x-access-token:' + token).encode()).decode()
+    from urllib.parse import urlsplit
+    if 'extraheader' in env.get('GIT_CONFIG_PARAMETERS', '').lower():
+        raise RuntimeError('Unsupported parameter header authority')
+    found = 0
+    for i in range(n):
+        k, v = env[f'GIT_CONFIG_KEY_{i}'], env[f'GIT_CONFIG_VALUE_{i}']
+        if not k.lower().endswith('.extraheader'):
+            continue
+        if not re.match(r'^\s*authorization\s*:', v, re.IGNORECASE):
+            continue
+        applicable = k.lower() == 'http.extraheader'
+        if k.lower().startswith('http.') and not applicable:
+            scope = k[5:-12]
+            parsed = urlsplit(scope)
+            if '*' in scope or not parsed.scheme or not parsed.hostname:
+                raise RuntimeError('Unsupported Authorization URL scope')
+            if parsed.hostname.lower() == 'github.com':
+                if parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.port:
+                    raise RuntimeError('Unsupported GitHub Authorization scope')
+                target_path = '/metacraft-labs/metacraft-github-actions'
+                applicable = parsed.scheme.lower() == 'https' and (not parsed.path or target_path.startswith(parsed.path.rstrip('/') + '/') or target_path == parsed.path.rstrip('/'))
+        if applicable:
+            if k != key or v != value:
+                raise RuntimeError('Conflicting checkout authorization')
+            found += 1
+    if found > 1: raise RuntimeError('Duplicate checkout authorization')
+    if not found:
+        env[f'GIT_CONFIG_KEY_{n}'] = key; env[f'GIT_CONFIG_VALUE_{n}'] = value; n += 1
+    env.update(GIT_CONFIG_COUNT=str(n), GIT_TERMINAL_PROMPT='0', GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull)
+    record = {'pin': PIN, 'claim': claim, 'tools': TOOLS, 'success': False, 'steps': []}
+    receipt = RECEIPTS / 'checkout.json'
+    with receipt.open('x') as f: json.dump(record, f, indent=2)
+    try:
+        for args in [('init', '--template='), ('-c', 'core.longpaths=true', 'fetch', '--no-tags', '--depth=1', 'https://github.com/metacraft-labs/metacraft-github-actions', PIN)]:
+            verify_claim()
+            if {role: tool(v['lexical']) for role, v in TOOLS.items()} != TOOLS: raise RuntimeError('Changed checkout tools')
+            result = subprocess.run([TOOLS['git']['resolved'], '-C', str(TARGET), *args], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            record['steps'].append({'operation': args[0], 'exit': result.returncode})
+            if result.returncode: raise RuntimeError('Native checkout Git operation failed')
+        if git('rev-parse', 'FETCH_HEAD').decode().strip() != PIN: raise RuntimeError('Wrong fetched object')
+        result = subprocess.run([TOOLS['git']['resolved'], '-C', str(TARGET), 'checkout', '--detach', PIN], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if result.returncode: raise RuntimeError('Native checkout detach failed')
+        record['source'] = source(); verify_claim(); record['success'] = True
+    except Exception as error:
+        record['error'] = {'type': type(error).__name__, 'message': str(error)}
+    finally:
+        try:
+            verify_claim()
+            if {role: tool(v['lexical']) for role, v in TOOLS.items()} != TOOLS:
+                raise RuntimeError('Changed terminal checkout tools')
+        except Exception as error:
+            record['success'] = False
+            record['finalGuardError'] = {'type': type(error).__name__, 'message': str(error)}
+        receipt.write_text(json.dumps(record, indent=2) + '\n')
+    raise SystemExit(0 if record['success'] else 1)
 BEFORE = source()
 proof = {'scope': __doc__, 'platform': sys.platform, 'observedMachine': platform.machine(), 'declaredArchitecture': sys.argv[2], 'toolsBefore': TOOLS, 'sourceBefore': BEFORE, 'claim': claim, 'rows': [], 'success': False}
 PROOF = RECEIPTS / 'proof.json'

@@ -168,14 +168,17 @@ jobs:
 
       - name: Check out published Actions native contract source
         if: runner.os == 'Windows' || runner.os == 'macOS'
-        uses: actions/checkout@v4
+        working-directory: "${{ runner.os != 'Windows' && format('{0}/nim-agents', env.NIM_CI_NAMESPACE) || '.' }}"
+        shell: bash
         env:
+          NIM_NATIVE_CHECKOUT_TOKEN: ${{ steps.ci_token.outputs.token }}
           GIT_CONFIG_PARAMETERS: ${{ env.GIT_CONFIG_PARAMETERS != '' && format('{0} ', env.GIT_CONFIG_PARAMETERS) || '' }}'core.autocrlf'='false' 'core.eol'='lf' 'core.attributesfile'=''
-        with:
-          repository: metacraft-labs/metacraft-github-actions
-          ref: bb62bd138c8074a8d9654724e6951488486b60a1
-          path: ${{ env.NIM_CI_NAMESPACE }}/.ci-actions-native-contracts
-          persist-credentials: false
+        run: |
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            "$NIM_NATIVE_PYTHON" -B ci/qualify-actions-native-contracts.py checkout "${{ matrix.arch }}"
+          else
+            "${REPROBUILD_BOOTSTRAP_PYTHON:?Missing declared SDK Python}" -B ci/qualify-actions-native-contracts.py checkout "${{ matrix.arch }}"
+          fi
 
       - name: Execute original native Actions Git contracts
         if: runner.os == 'Windows' || runner.os == 'macOS'
