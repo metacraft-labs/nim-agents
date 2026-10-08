@@ -80,6 +80,36 @@ jobs:
           env-flavor: reprobuild
           gh-token: ${{ steps.ci_token.outputs.token }}
 
+      - name: Bind the installed Repro package Nix companion
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Bind the companion from this actual selected release package.
+          repro_bin="$(command -v repro)"
+          [[ "$repro_bin" == /* ]] || {
+            echo "::error::The selected Repro launcher is not an absolute package path"
+            exit 1
+          }
+          [[ -f "$repro_bin" && ! -L "$repro_bin" && -x "$repro_bin" ]] || {
+            echo "::error::The selected Repro launcher is not a regular executable package file"
+            exit 1
+          }
+          package_bin="$(cd -- "$(dirname -- "$repro_bin")" && pwd -P)"
+          companion="$package_bin/reprobuild-nix-daemon"
+          if [[ -n "${REPROBUILD_NIX_DAEMON_BIN:-}" ]]; then
+            [[ "$REPROBUILD_NIX_DAEMON_BIN" == "$companion" ]] || {
+              echo "::error::The inherited Nix companion does not belong to the selected release package"
+              exit 1
+            }
+          fi
+          [[ -f "$companion" && ! -L "$companion" && -x "$companion" ]] || {
+            echo "::error::The installed Repro package has no regular executable Nix companion: $companion"
+            exit 1
+          }
+          "$companion" --help
+          echo "REPROBUILD_NIX_DAEMON_BIN=$companion" >> "$GITHUB_ENV"
+
       - name: repro build
         # Builds the conventional `build` collection declared in
         # `repro.nim`. Verifies the primary shipping artefact (the
