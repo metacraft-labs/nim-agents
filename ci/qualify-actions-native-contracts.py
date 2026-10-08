@@ -5,7 +5,7 @@ consumer product's original tests or complete promotion gates.
 """
 from pathlib import Path
 import os, sys, stat, json, hashlib, subprocess, shutil, time, platform, re
-PIN = 'bb62bd138c8074a8d9654724e6951488486b60a1'
+PIN = '440187b477282220f1c4a8432b77b6d06f2a7146'
 NAME = '.ci-actions-native-contracts'
 ROOT = Path(os.environ['GITHUB_WORKSPACE']).absolute()
 CONSUMER = Path.cwd().absolute()
