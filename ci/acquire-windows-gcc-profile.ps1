@@ -8,13 +8,13 @@ $ExpectedCompilerBlake3 = 'blake3:3d3fc5366f262a8de80e9650cbd174c0ad075874cb8d16
 $ExpectedPayloadSHA = '004555fc4f053cc1c7ed58594c9c71ab95c902d954b4591a618959b94759564b'
 function Regular-File([string]$path) {
   if (-not [IO.Path]::IsPathFullyQualified($path)) { throw 'Relative file authority refused' }
-  $item = Get-Item -LiteralPath $path
+  $item = Get-Item -LiteralPath $path -Force
   if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Nonregular file authority refused' }
   [ordered]@{path=$item.FullName;length=$item.Length;attributes=[string]$item.Attributes;sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()}
 }
 function Checked-Directory([string]$path) {
   if (-not [IO.Path]::IsPathFullyQualified($path)) { throw 'Relative directory authority refused' }
-  $item = Get-Item -LiteralPath $path
+  $item = Get-Item -LiteralPath $path -Force
   if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Foreign directory authority refused' }
   $item.FullName
 }
@@ -93,6 +93,13 @@ function Verified-Archive([string]$store,[string]$root) {
   try{$input=$client.GetStreamAsync($ExpectedUrl).GetAwaiter().GetResult();try{$input.CopyTo($stream)}finally{$input.Dispose()}}finally{$stream.Dispose();$client.Dispose()}
   $file=Regular-File $path;if($file.sha256 -cne $ExpectedHash){throw 'Actual retrieved archive integrity refused'};$file
 }
+function Write-AcquisitionAttempt([string]$root,$receipt) {
+  $directory=Checked-Directory (Join-Path $root '.repro')
+  $out=Join-Path $directory ('gcc-profile-acquisition-attempt-'+[Guid]::NewGuid().ToString('N')+'.json')
+  $stream=[IO.File]::Open($out,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+  try{$bytes=[Text.Encoding]::UTF8.GetBytes(($receipt|ConvertTo-Json -Depth 8));$stream.Write($bytes,0,$bytes.Length)}finally{$stream.Dispose()}
+  $out
+}
 function Acquire-DeclaredGcc {
   if($env:RUNNER_OS -cne 'Windows' -or $env:RUNNER_ARCH -cne 'X64' -or [Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64'){throw 'Native Windows x64 boundary required'}
   $root=(Get-Location).Path
@@ -106,6 +113,14 @@ function Acquire-DeclaredGcc {
   $publicBefore=Regular-File $public
   $scriptBefore=Regular-File $PSCommandPath
   try {
+  $sdk=[ordered]@{}
+  foreach($name in @('nim.exe','gcc.exe')) {
+    $candidate=Get-Command $name -CommandType Application -ErrorAction SilentlyContinue
+    if($candidate){$sdk[$name]=Regular-File $candidate.Source}
+  }
+  $attempt=[ordered]@{scope='pre-graph authority only; GCC profile and product actions unexecuted';publicCLI=$publicBefore;script=$scriptBefore;git=$gitBefore;owning=$ownBefore;workflow=(Regular-File (Join-Path $root '.github/workflows/ci-reprobuild.yml'));sdkCandidates=$sdk}
+  $attemptPath=Write-AcquisitionAttempt $root $attempt
+  Write-Output "Pre-graph authority receipt: $attemptPath"
   $raw = & $public graph test --json --tool-provisioning=tarball
   if($LASTEXITCODE -ne 0){throw 'Declared tarball graph acquisition failed'}
   $graph=($raw -join "`n") | ConvertFrom-Json
