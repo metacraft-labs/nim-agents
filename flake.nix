@@ -2,6 +2,10 @@
   description = "nim-agents - shared Nim agent abstraction";
 
   inputs = {
+    mcl-standard-hook-source = {
+      url = "github:metacraft-labs/devops-modules/c8ef41d446e211892fe9775182b43d5d517554ac";
+      flake = false;
+    };
     nixos-modules.url = "github:metacraft-labs/devops-modules";
     nixpkgs.follows = "nixos-modules/nixpkgs-unstable";
     flake-parts.follows = "nixos-modules/flake-parts";
@@ -40,18 +44,11 @@
               && [ "$(${pkgs.coreutils}/bin/sha256sum "$_own_repo_root/flake.nix" | ${pkgs.coreutils}/bin/cut -d' ' -f1)" \
                 = "${builtins.hashFile "sha256" ./flake.nix}" ]; then
             ${script}
-            # git-hooks.nix's installer leaves core.hooksPath as the RELATIVE
-            # `.git/hooks`, in the config every worktree shares. A linked worktree
-            # cannot resolve it (there `.git` is a file), so git silently runs no
-            # hooks there. Point it at the common hooks directory instead.
-            if [ "$(${pkgs.git}/bin/git config --local --get core.hooksPath 2>/dev/null)" = .git/hooks ]; then
-              ${pkgs.git}/bin/git config --local core.hooksPath "$(${pkgs.git}/bin/git rev-parse --path-format=absolute --git-common-dir)/hooks"
-            fi
             fi
             unset _own_repo_root
           '';
 
-          preCommit = git-hooks.lib.${system}.run {
+          legacyPreCommit = git-hooks.lib.${system}.run {
             src = ./.;
             hooks = {
               check-added-large-files.enable = true;
@@ -65,19 +62,102 @@
               };
             };
           };
+          standardHooks = import (inputs.mcl-standard-hook-source + "/git-hooks/standard-hooks.nix") {
+            inherit pkgs;
+            lib = pkgs.lib;
+            src = inputs.mcl-standard-hook-source;
+          };
+          # Exact reviewed public capability; other package versions keep their
+          # original native constructor and previously qualified authority.
+          nativePrek =
+            if pkgs.prek.version == "0.3.11" then
+              (pkgs.writeShellScriptBin "prek" ''
+                exec ${pkgs.python3}/bin/python3 ${./nix/native-package-adapter.py} ${pkgs.lib.getExe pkgs.prek} ${pkgs.git}/bin/git "$@"
+              '').overrideAttrs
+                (_: {
+                  pname = pkgs.prek.pname;
+                  version = pkgs.prek.version;
+                })
+            else
+              pkgs.prek;
+          preCommit = git-hooks.lib.${system}.run {
+            src = ./.;
+            package = nativePrek;
+            hooks = standardHooks // {
+              check-merge-conflicts.enable = true;
+              lint = {
+                enable = true;
+                name = "just lint";
+                entry = "just lint";
+                language = "system";
+                pass_filenames = false;
+              };
+            };
+          };
+          nativeHookFactory =
+            configuration:
+            pkgs.runCommand "nim-agents-native-hook-factory"
+              {
+                nativeBuildInputs = [
+                  pkgs.git
+                  pkgs.bash
+                  configuration.config.package
+                ];
+              }
+              ''
+                export PRE_COMMIT_HOME="$TMPDIR/nim-agents-native-hook-cache"
+                export XDG_CACHE_HOME="$TMPDIR/nim-agents-native-factory-cache"
+                export GIT_CONFIG_GLOBAL="$TMPDIR/nim-agents-native-factory-gitconfig"
+                export GIT_CONFIG_NOSYSTEM=1
+                : > "$GIT_CONFIG_GLOBAL"
+                mkdir -p "$PRE_COMMIT_HOME" "$XDG_CACHE_HOME" fixture
+                cd fixture
+                git init --template= >/dev/null
+                if git config --get core.hooksPath; then
+                  echo 'Unexpected native factory hooksPath authority' >&2
+                  exit 1
+                fi
+                test "$(git rev-parse --path-format=absolute --git-path hooks)" = "$PWD/.git/hooks"
+                ln -s ${configuration.config.configFile} ${configuration.config.configPath}
+                mkdir -p "$out"
+                for hook in pre-commit pre-push; do
+                  ${pkgs.lib.getExe configuration.config.package} install -c ${configuration.config.configPath} -t "$hook"
+                  install -m 0755 ".git/hooks/$hook" "$out/$hook"
+                done
+              '';
+          expectedNativeHook = nativeHookFactory preCommit;
+          expectedLegacyNativeHook = nativeHookFactory legacyPreCommit;
+          hookOwnershipGuard = ./nix/hook-ownership-guard.py;
+          hookTransaction = ./nix/hook-transaction.py;
+          actualNativeInstaller = pkgs.writeShellScript "nim-agents-native-hook-installer" preCommit.shellHook;
+          guardedHookInstall = ''
+            ${pkgs.python3}/bin/python3 ${hookTransaction} "$_own_repo_root" ${hookOwnershipGuard} ${expectedNativeHook} ${pkgs.git}/share/git-core/templates ${expectedLegacyNativeHook} ${preCommit.config.configFile} ${legacyPreCommit.config.configFile} ${actualNativeInstaller} ${pkgs.git}/bin/git ${pkgs.bash}/bin/bash >&2
+            _nim_agents_hook_status=$?
+            if [ "$_nim_agents_hook_status" -ne 0 ]; then
+              unset _nim_agents_hook_status
+              exit 1
+            fi
+            unset _nim_agents_hook_status
+          '';
         in
         {
           checks.pre-commit = preCommit;
           devShells.default = pkgs.mkShell {
-            packages = with pkgs; [
-              nim
-              nimble
-              just
-              nodejs
-              nixfmt-rfc-style
-            ];
+            packages =
+              preCommit.enabledPackages
+              ++ (with pkgs; [
+                nim
+                nimble
+                just
+                nodejs
+                nixfmt-rfc-style
+                git
+                bash
+                python3
+                prek
+              ]);
             shellHook = ''
-              ${ownRepoOnly preCommit.shellHook}
+              ${ownRepoOnly guardedHookInstall}
             '';
           };
           packages.default = pkgs.stdenvNoCC.mkDerivation {
