@@ -94,7 +94,13 @@ function Verified-Archive([string]$store,[string]$root) {
   $file=Regular-File $path;if($file.sha256 -cne $ExpectedHash){throw 'Actual retrieved archive integrity refused'};$file
 }
 function Write-AcquisitionAttempt([string]$root,$receipt) {
-  $directory=Checked-Directory (Join-Path $root '.repro')
+  $root=Checked-Directory $root
+  $metadataPath=Join-Path $root '.repro'
+  if (-not (Test-Path -LiteralPath $metadataPath)) {
+    # No Force: a raced existing entry is a refusal, never an overwrite.
+    New-Item -ItemType Directory -Path $metadataPath -ErrorAction Stop | Out-Null
+  }
+  $directory=Checked-Directory $metadataPath
   $out=Join-Path $directory ('gcc-profile-acquisition-attempt-'+[Guid]::NewGuid().ToString('N')+'.json')
   $stream=[IO.File]::Open($out,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
   try{$bytes=[Text.Encoding]::UTF8.GetBytes(($receipt|ConvertTo-Json -Depth 8));$stream.Write($bytes,0,$bytes.Length)}finally{$stream.Dispose()}
