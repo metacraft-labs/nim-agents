@@ -118,6 +118,28 @@ jobs:
           repro-from-source: ${{ runner.os != 'Windows' && 'true' || 'false' }}
           repro-build-pin: ${{ runner.os != 'Windows' && '76659f5730ecf698b1963c656494d2cb66eb256d' || 'dev' }}
 
+      - name: Refresh the owning installation token after SDK preparation
+        if: runner.os != 'Windows'
+        id: nix_token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
+      - name: Bind fresh owner-scoped Nix fetcher credentials
+        if: runner.os != 'Windows'
+        working-directory: ${{ env.NIM_CI_NAMESPACE }}/nim-agents
+        shell: bash
+        env:
+          NIM_NIX_OLD_APP: ${{ steps.ci_token.outputs.token }}
+          NIM_NIX_FRESH_APP: ${{ steps.nix_token.outputs.token }}
+          NIM_NIX_PUBLIC_JOB: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          NIM_NIX_SOURCE_ROOT="$PWD" NIM_NIX_EXECUTABLE="$(command -v nix)" \
+            "${REPROBUILD_BOOTSTRAP_PYTHON:?SDK did not export its declared Python}" -B .github/scripts/route-nix-credentials.py
+
       - name: Bind the installed Repro package Nix companion
         working-directory: "${{ runner.os != 'Windows' && format('{0}/nim-agents', env.NIM_CI_NAMESPACE) || '.' }}"
         if: runner.os == 'Linux'
@@ -292,6 +314,7 @@ jobs:
           name: reprobuild-logs-${{ matrix.os }}-${{ matrix.arch }}
           path: |
             ${{ runner.os != 'Windows' && format('{0}/nim-agents/', env.NIM_CI_NAMESPACE) || '' }}.repro/gcc-profile-acquisition-*.json
+            ${{ runner.os != 'Windows' && format('{0}/nim-agents/', env.NIM_CI_NAMESPACE) || '' }}.repro/nix-credential-routing-*.json
             ${{ runner.os != 'Windows' && format('{0}/nim-agents/', env.NIM_CI_NAMESPACE) || '' }}.repro/compiler-diagnostics/
             ${{ runner.os != 'Windows' && format('{0}/nim-agents/', env.NIM_CI_NAMESPACE) || '' }}.repro/build/*/build-failure-report.json
             ${{ runner.os != 'Windows' && format('{0}/nim-agents/', env.NIM_CI_NAMESPACE) || '' }}.repro/build/*/build-engine-cache/actions/
