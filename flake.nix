@@ -207,6 +207,14 @@
               ${ownRepoOnly guardedHookInstall}
             '';
           };
+          packages.ci-native-contract-utilities = pkgs.symlinkJoin {
+            name = "nim-native-contract-utilities";
+            paths = [
+              pkgs.coreutils
+              pkgs.gnugrep
+              pkgs.gnused
+            ];
+          };
           packages.default = pkgs.stdenvNoCC.mkDerivation {
             pname = "nim-agents";
             version = builtins.readFile ./VERSION;

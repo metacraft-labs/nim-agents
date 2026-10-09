@@ -195,6 +195,20 @@ try:
         raise RuntimeError('Windows Bash is not the native Git shell')
     if sys.platform not in ['win32', 'darwin']: raise RuntimeError('Native channel platform refused')
     proof['bashProbe'] = probe
+    if sys.platform == 'darwin':
+        # Real original fixture prerequisite; retain commit diagnostics instead of guessing.
+        import tempfile
+        fixture = Path(tempfile.mkdtemp(prefix='native-git-fixture-', dir=RECEIPTS))
+        fixtureConfig = subprocess.check_output([TOOLS['git']['resolved'], 'config', '--null', '--show-origin', '--show-scope', '--list'], cwd=TARGET)
+        for label, args in [('init', ['init', '-b', 'main', str(fixture)]), ('add', ['-C', str(fixture), 'add', 'README']), ('commit', ['-C', str(fixture), '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'init']), ('head', ['-C', str(fixture), 'rev-parse', 'HEAD'])]:
+            if label == 'add': (fixture / 'README').write_text('genuine native Git fixture\n')
+            out = RECEIPTS / ('fixture-' + label + '.stdout'); err = RECEIPTS / ('fixture-' + label + '.stderr')
+            with out.open('xb') as stdout, err.open('xb') as stderr:
+                child = subprocess.Popen([TOOLS['git']['resolved'], *args], cwd=TARGET, stdout=stdout, stderr=stderr)
+                status = child.wait()
+            proof.setdefault('fixtureRows', []).append({'stage': label, 'pid': child.pid, 'exit': status, 'stdout': identity(out), 'stderr': identity(err), 'scope': 'Owned direct-child natural wait only'})
+            if fixtureConfig != subprocess.check_output([TOOLS['git']['resolved'], 'config', '--null', '--show-origin', '--show-scope', '--list'], cwd=TARGET): raise RuntimeError('Changed caller Git configuration')
+            if status: raise RuntimeError('Original native Git fixture prerequisite failed')
     for name in ['authenticated-clone-test.sh', 'longpaths-test.sh']:
         if source() != BEFORE or {n: tool(v['lexical']) for n, v in TOOLS.items()} != TOOLS:
             raise RuntimeError('Changed native source or tool before suite')

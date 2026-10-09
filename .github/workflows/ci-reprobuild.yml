@@ -177,6 +177,13 @@ jobs:
         shell: pwsh
         run: pwsh -NoProfile -File ci/acquire-native-python.ps1 -Architecture "${{ matrix.arch }}"
 
+      - name: Acquire declared native Unix Actions contract utilities
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          cd "${NIM_CI_NAMESPACE}/nim-agents"
+          "${REPROBUILD_BOOTSTRAP_PYTHON:?Missing declared SDK Python}" -B ci/acquire-native-contract-utilities.py
+
       - name: Claim exclusive native Actions contract directory
         if: runner.os == 'Windows' || runner.os == 'macOS'
         working-directory: "${{ runner.os != 'Windows' && format('{0}/nim-agents', env.NIM_CI_NAMESPACE) || '.' }}"
@@ -239,6 +246,7 @@ jobs:
             .repro/runquota-bootstrap-*.json
             ${{ runner.temp }}/native-runquota-*/*.stdout
             ${{ runner.temp }}/native-runquota-*/*.stderr
+            ${{ runner.temp }}/nim-native-utilities-*/receipt.json
           include-hidden-files: true
           retention-days: 7
           if-no-files-found: warn
