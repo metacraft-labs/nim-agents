@@ -196,11 +196,12 @@ try:
     if sys.platform not in ['win32', 'darwin']: raise RuntimeError('Native channel platform refused')
     proof['bashProbe'] = probe
     if sys.platform == 'darwin':
-        # Real original fixture prerequisite; retain commit diagnostics instead of guessing.
+        # A private repository isolates the real Git init/add/commit/HEAD prerequisite.
+        # Signatures are not asserted; original native auth/longpath suites remain required.
         import tempfile
         fixture = Path(tempfile.mkdtemp(prefix='native-git-fixture-', dir=RECEIPTS))
         fixtureConfig = subprocess.check_output([TOOLS['git']['resolved'], 'config', '--null', '--show-origin', '--show-scope', '--list'], cwd=TARGET)
-        for label, args in [('init', ['init', '-b', 'main', str(fixture)]), ('add', ['-C', str(fixture), 'add', 'README']), ('commit', ['-C', str(fixture), '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'init']), ('head', ['-C', str(fixture), 'rev-parse', 'HEAD'])]:
+        for label, args in [('init', ['init', '-b', 'main', str(fixture)]), ('add', ['-C', str(fixture), 'add', 'README']), ('commit', ['-C', str(fixture), '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--no-gpg-sign', '-qm', 'init']), ('head', ['-C', str(fixture), 'rev-parse', 'HEAD'])]:
             if label == 'add': (fixture / 'README').write_text('genuine native Git fixture\n')
             out = RECEIPTS / ('fixture-' + label + '.stdout'); err = RECEIPTS / ('fixture-' + label + '.stderr')
             with out.open('xb') as stdout, err.open('xb') as stderr:
