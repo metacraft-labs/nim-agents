@@ -105,6 +105,13 @@ jobs:
           nix run .#capture-ci-checkout-authority -- .repro/ci-git-authority
           GIT_OPTIONAL_LOCKS=0 nix run .#prepare-ci-hook-samples -- .repro/ci-git-authority > .repro/ci-sample-transition.json
 
+      - name: Install the release authenticated by the RunQuota bootstrap policy
+        if: runner.os == 'Windows' && matrix.arch == 'x64'
+        uses: metacraft-labs/metacraft-github-actions/setup-reprobuild@58da84d5af27408ca598ce69caa83b133e054592
+        with:
+          from-source: "false"
+          repro-version: v0.2.6
+
       - name: Setup dev env (reprobuild flavor)
         # setup-dev-env clones the siblings listed in .github/sibling-repos
         # (codetracer-trace-format, codetracer-trace-format-nim) at the
