@@ -158,25 +158,27 @@ def native_ps(arguments, allow_missing=False):
 def darwin_session_members(sid):
     live, unknown = [], []
     try:
-        output, principal = native_ps(["-axo", "pid=,state="])
+        output, principal = native_ps(["-axo", "pid=,uid=,state="])
     except (OSError, UnicodeError, RuntimeError) as error:
         return [], [["native-ps", type(error).__name__]]
     seen = set()
     for line in output.splitlines():
         try:
             fields = line.split()
-            require(len(fields) == 2 and fields[0].isdigit() and int(fields[0]) > 0
-                    and fields[1][0] in "DIRSTUZ", "Malformed native process row")
+            require(len(fields) == 3 and fields[0].isdigit() and int(fields[0]) > 0
+                    and fields[1].isdigit() and fields[2][0] in "DIRSTUZ", "Malformed native process row")
             pid = int(fields[0])
             require(pid not in seen, "Duplicate native process row")
             seen.add(pid)
             actual_sid = os.getsid(pid)
-            if fields[1][0] != "Z" and actual_sid == sid:
+            if fields[2][0] != "Z" and actual_sid == sid:
                 live.append(str(pid))
         except ProcessLookupError:
             continue
         except (OSError, ValueError, IndexError, RuntimeError) as error:
-            unknown.append([fields[0] if fields else "row", type(error).__name__])
+            unknown.append([fields[0] if fields else "row", type(error).__name__,
+                            fields[1] if len(fields) == 3 and fields[1].isdigit() else "unknown-uid",
+                            fields[2] if len(fields) == 3 else "unknown-state"])
     return live, unknown
 
 
@@ -246,6 +248,8 @@ def initialize(tool, templates, destination, creation_mask):
                     pass
             while True:
                 live, unknown = session_members(child.pid)
+                if unknown:
+                    print("Native session census diagnostic: " + json.dumps(unknown), file=sys.stderr)
                 require(not unknown, "Unknown owned session census")
                 if not live:
                     break
