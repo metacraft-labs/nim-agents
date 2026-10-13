@@ -35,7 +35,10 @@ test-js:
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_consumers.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_session_load_client.nim
 
-lint: lint-nim lint-nix
+lint: lint-nim lint-nix lint-ci-metadata
+
+lint-ci-metadata:
+    python3 -B tests/test_ci_initial_samples_uid.py
 
 lint-nim:
     nim check {{paths}} tests/test_agents.nim

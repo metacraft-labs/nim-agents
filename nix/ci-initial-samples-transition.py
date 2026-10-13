@@ -155,6 +155,29 @@ def native_ps(arguments, allow_missing=False):
     return out.decode("ascii", errors="strict"), {"path": str(image), "identity": before}
 
 
+def darwin_numeric_uid(text):
+    # Darwin ps uses UIDFMT "d" for the kernel's uint32 uid_t field:
+    # https://github.com/apple-oss-distributions/adv_cmds/blob/main/ps/keyword.c
+    # Normalize only its legal decimal representations; malformed or
+    # out-of-range values remain unknown rather than weakening the census.
+    if text.isascii() and text.isdigit():
+        value = int(text)
+        require(value <= 0xffffffff, "Native UID outside uid_t range")
+        return value
+    if text.startswith("-") and text[1:].isascii() and text[1:].isdigit():
+        value = int(text)
+        require(-0x80000000 <= value < 0, "Native signed UID outside int32 range")
+        return value & 0xffffffff
+    raise RuntimeError("Malformed native UID")
+
+
+def darwin_uid_diagnostic(fields):
+    try:
+        return str(darwin_numeric_uid(fields[1])) if len(fields) == 3 else "unknown-uid"
+    except (RuntimeError, ValueError, IndexError):
+        return "unknown-uid"
+
+
 def darwin_session_members(sid):
     live, unknown = [], []
     try:
@@ -166,7 +189,8 @@ def darwin_session_members(sid):
         try:
             fields = line.split()
             require(len(fields) == 3 and fields[0].isdigit() and int(fields[0]) > 0
-                    and fields[1].isdigit() and fields[2][0] in "DIRSTUZ", "Malformed native process row")
+                    and fields[2][0] in "DIRSTUZ", "Malformed native process row")
+            darwin_numeric_uid(fields[1])
             pid = int(fields[0])
             require(pid not in seen, "Duplicate native process row")
             seen.add(pid)
@@ -177,7 +201,7 @@ def darwin_session_members(sid):
             continue
         except (OSError, ValueError, IndexError, RuntimeError) as error:
             unknown.append([fields[0] if fields else "row", type(error).__name__,
-                            fields[1] if len(fields) == 3 and fields[1].isdigit() else "unknown-uid",
+                            darwin_uid_diagnostic(fields),
                             fields[2] if len(fields) == 3 else "unknown-state"])
     return live, unknown
 
