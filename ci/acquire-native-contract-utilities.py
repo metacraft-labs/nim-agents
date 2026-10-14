@@ -72,7 +72,7 @@ try:
   expectedDeriver=run(['nix','eval','--raw','--no-update-lock-file',ref+'.drvPath']).decode().strip()
   build=json.loads(run(['nix','build','--no-link','--json','--no-update-lock-file',ref+'.out']));assert len(build)==1 and build[0]['drvPath']==expectedDeriver
   output=build[0]['outputs']['out'];assert output.startswith('/nix/store/') and '\n' not in output
-  utilityNames=['grep','sed','sort','head','dirname','basename','mktemp','mkdir','rm','cat','chmod','env','sleep']
+  utilityNames=['grep','sed','sort','head','dirname','basename','mktemp','mkdir','rm','cat','chmod','env','sleep','gpg','gpgconf']
   shellImages={str(Path(output)/'bin'/name):image(Path(output)/'bin'/name) for name in utilityNames}
   version=b''
   for name in ['grep','sed','sort']:

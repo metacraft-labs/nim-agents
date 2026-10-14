@@ -213,6 +213,7 @@
               pkgs.coreutils
               pkgs.gnugrep
               pkgs.gnused
+              pkgs.gnupg
             ];
           };
           packages.default = pkgs.stdenvNoCC.mkDerivation {

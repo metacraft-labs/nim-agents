@@ -187,6 +187,10 @@ if sys.argv[1] == 'checkout':
 BEFORE = source()
 proof = {'scope': __doc__, 'platform': sys.platform, 'observedMachine': platform.machine(), 'declaredArchitecture': sys.argv[2], 'toolsBefore': TOOLS, 'sourceBefore': BEFORE, 'claim': claim, 'rows': [], 'success': False}
 PROOF = RECEIPTS / 'proof.json'
+signing_home = None
+signing_identity = None
+signing_fd = None
+signing_env = dict(os.environ)
 with PROOF.open('x') as f: json.dump(proof, f, indent=2)
 try:
     probe = subprocess.check_output([TOOLS['bash']['resolved'], '-c', 'printf "%s\n%s\n" "$BASH_VERSINFO" "$OSTYPE"'], text=True).splitlines()
@@ -199,23 +203,70 @@ try:
         # A private repository isolates the real Git init/add/commit/HEAD prerequisite.
         # Match the original suite's default commit policy; do not mask signing failures.
         import tempfile
+        # These are real signed fixture commits with a private, disposable key.
+        # Indexed Git authorization remains intact; runner signing keys are unused.
+        for role in ['gpg', 'gpgconf']:
+            TOOLS[role] = tool(role)
+        proof['toolsBefore'] = TOOLS
+        temp_root = Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
+        temp_identity = directory(temp_root)
+        signing_home = Path(tempfile.mkdtemp(prefix='nim-native-fixture-signing-', dir=temp_root))
+        signing_identity = directory(signing_home)
+        signing_fd = os.open(signing_home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        signing_stat = os.fstat(signing_fd)
+        if signing_stat.st_uid != os.getuid():
+            raise RuntimeError('Foreign signing fixture owner')
+        if os.path.commonpath([str(signing_home), str(RECEIPTS)]) == str(RECEIPTS):
+            raise RuntimeError('Signing keys overlap archived receipts')
+        if signing_home.parent != temp_root or not signing_home.name.startswith('nim-native-fixture-signing-'):
+            raise RuntimeError('Foreign signing fixture namespace')
+        # The workflow archives nim-native-utilities-*/receipt.json and
+        # native-runquota-* logs, not this separate private signing prefix.
+        proof['fixtureSigning'] = {'home': signing_identity, 'owner': signing_stat.st_uid, 'scope': 'Exclusive private signing namespace outside declared artifact roots'}
+        if signing_identity['mode'] != 0o700:
+            raise RuntimeError('Signing fixture directory is not private')
+        signing_env['GNUPGHOME'] = str(signing_home)
+        generate = subprocess.run([TOOLS['gpg']['resolved'], '--batch', '--pinentry-mode', 'loopback', '--passphrase', '', '--quick-generate-key', 'NimAgents CI fixture <ci-fixture@invalid>', 'ed25519', 'sign', '1d'], env=signing_env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        if generate.returncode:
+            raise RuntimeError('Real fixture signing-key generation failed')
+        keys = subprocess.check_output([TOOLS['gpg']['resolved'], '--batch', '--with-colons', '--list-secret-keys'], env=signing_env, stderr=subprocess.DEVNULL).decode().splitlines()
+        fingerprints = [row.split(':')[9] for row in keys if row.startswith('fpr:')]
+        if len(fingerprints) != 1 or not re.fullmatch(r'[0-9A-F]{40}', fingerprints[0]):
+            raise RuntimeError('Signing fixture key is not unique')
+        count = signing_env.get('GIT_CONFIG_COUNT', '0')
+        if not re.fullmatch(r'0|[1-9][0-9]*', count):
+            raise RuntimeError('Malformed indexed Git signing environment')
+        n = int(count)
+        indexed = {k for k in signing_env if re.fullmatch(r'GIT_CONFIG_(KEY|VALUE)_[0-9]+', k)}
+        if indexed != {f'GIT_CONFIG_{role}_{i}' for i in range(n) for role in ['KEY', 'VALUE']}:
+            raise RuntimeError('Incomplete indexed Git signing environment')
+        for key, value in [('commit.gpgsign', 'true'), ('gpg.format', 'openpgp'), ('gpg.program', TOOLS['gpg']['resolved']), ('user.signingkey', fingerprints[0])]:
+            signing_env[f'GIT_CONFIG_KEY_{n}'] = key
+            signing_env[f'GIT_CONFIG_VALUE_{n}'] = value
+            n += 1
+        signing_env['GIT_CONFIG_COUNT'] = str(n)
+        if directory(temp_root) != temp_identity or directory(signing_home) != signing_identity:
+            raise RuntimeError('Changed signing fixture directory')
+        proof['fixtureSigning']['fingerprint'] = fingerprints[0]
         fixture = Path(tempfile.mkdtemp(prefix='native-git-fixture-', dir=RECEIPTS))
-        fixtureConfig = subprocess.check_output([TOOLS['git']['resolved'], 'config', '--null', '--show-origin', '--show-scope', '--list'], cwd=TARGET)
-        for label, args in [('init', ['init', '-b', 'main', str(fixture)]), ('add', ['-C', str(fixture), 'add', 'README']), ('commit', ['-C', str(fixture), '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'init']), ('head', ['-C', str(fixture), 'rev-parse', 'HEAD'])]:
+        fixtureConfig = subprocess.check_output([TOOLS['git']['resolved'], 'config', '--null', '--show-origin', '--show-scope', '--list'], cwd=TARGET, env=signing_env)
+        for label, args in [('init', ['init', '-b', 'main', str(fixture)]), ('add', ['-C', str(fixture), 'add', 'README']), ('commit', ['-C', str(fixture), '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'init']), ('head', ['-C', str(fixture), 'rev-parse', 'HEAD']), ('verify-signature', ['-C', str(fixture), 'verify-commit', 'HEAD']), ('signer-fingerprint', ['-C', str(fixture), 'log', '-1', '--format=%GF'])]:
             if label == 'add': (fixture / 'README').write_text('genuine native Git fixture\n')
             out = RECEIPTS / ('fixture-' + label + '.stdout'); err = RECEIPTS / ('fixture-' + label + '.stderr')
             with out.open('xb') as stdout, err.open('xb') as stderr:
-                child = subprocess.Popen([TOOLS['git']['resolved'], *args], cwd=TARGET, stdout=stdout, stderr=stderr)
+                child = subprocess.Popen([TOOLS['git']['resolved'], *args], cwd=TARGET, stdout=stdout, stderr=stderr, env=signing_env)
                 status = child.wait()
             proof.setdefault('fixtureRows', []).append({'stage': label, 'pid': child.pid, 'exit': status, 'stdout': identity(out), 'stderr': identity(err), 'scope': 'Owned direct-child natural wait only'})
-            if fixtureConfig != subprocess.check_output([TOOLS['git']['resolved'], 'config', '--null', '--show-origin', '--show-scope', '--list'], cwd=TARGET): raise RuntimeError('Changed caller Git configuration')
+            if fixtureConfig != subprocess.check_output([TOOLS['git']['resolved'], 'config', '--null', '--show-origin', '--show-scope', '--list'], cwd=TARGET, env=signing_env): raise RuntimeError('Changed caller Git configuration')
             if status: raise RuntimeError('Original native Git fixture prerequisite failed')
+            if label == 'signer-fingerprint' and out.read_text().strip() != fingerprints[0]:
+                raise RuntimeError('Fixture commit has a foreign signing fingerprint')
     for name in ['authenticated-clone-test.sh', 'longpaths-test.sh']:
         if source() != BEFORE or {n: tool(v['lexical']) for n, v in TOOLS.items()} != TOOLS:
             raise RuntimeError('Changed native source or tool before suite')
         out = RECEIPTS / (name + '.stdout'); err = RECEIPTS / (name + '.stderr')
         with out.open('xb') as stdout, err.open('xb') as stderr:
-            child = subprocess.Popen([TOOLS['bash']['resolved'], 'git-auth/' + name], cwd=TARGET, stdout=stdout, stderr=stderr, env=dict(os.environ, MCL_TEST_PYTHON_EXECUTABLE=Path(TOOLS['python-executable']['resolved']).as_posix(), PYTHONDONTWRITEBYTECODE='1'))
+            child = subprocess.Popen([TOOLS['bash']['resolved'], 'git-auth/' + name], cwd=TARGET, stdout=stdout, stderr=stderr, env=dict(signing_env, MCL_TEST_PYTHON_EXECUTABLE=Path(TOOLS['python-executable']['resolved']).as_posix(), PYTHONDONTWRITEBYTECODE='1'))
             row = {'name': name, 'pid': child.pid, 'scope': 'Owned direct-child natural wait; no descendant census claim'}
             try: pass
             finally: row['exit'] = child.wait()
@@ -234,5 +285,26 @@ finally:
     except Exception as error:
         proof['success'] = False
         proof['finalGuardError'] = {'type': type(error).__name__, 'message': str(error)}
+    if signing_home is not None:
+        try:
+            if signing_identity is None:
+                raise RuntimeError('Unconfirmed signing directory retained; no key generation occurred')
+            current_stat = signing_home.lstat()
+            if directory(signing_home) != signing_identity or current_stat.st_uid != os.getuid():
+                raise RuntimeError('Changed owned signing fixture before cleanup')
+            held_stat = os.fstat(signing_fd)
+            if (current_stat.st_dev, current_stat.st_ino) != (held_stat.st_dev, held_stat.st_ino):
+                raise RuntimeError('Replaced signing fixture directory')
+            stopped = subprocess.run([TOOLS['gpgconf']['resolved'], '--homedir', str(signing_home), '--kill', 'gpg-agent'], env=signing_env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            if stopped.returncode:
+                raise RuntimeError('Owned signing fixture agent cleanup failed')
+            shutil.rmtree(signing_home)
+            proof.setdefault('fixtureSigning', {})['cleaned'] = True
+        except Exception as error:
+            proof['success'] = False
+            proof['signingCleanupError'] = {'type': type(error).__name__, 'message': str(error)}
+        finally:
+            if signing_fd is not None:
+                os.close(signing_fd)
     PROOF.write_text(json.dumps(proof, indent=2) + '\n')
 raise SystemExit(0 if proof['success'] else 1)
