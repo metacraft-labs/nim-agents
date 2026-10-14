@@ -226,7 +226,25 @@ try:
         if signing_identity['mode'] != 0o700:
             raise RuntimeError('Signing fixture directory is not private')
         signing_env['GNUPGHOME'] = str(signing_home)
-        generate = subprocess.run([TOOLS['gpg']['resolved'], '--batch', '--pinentry-mode', 'loopback', '--passphrase', '', '--quick-generate-key', 'NimAgents CI fixture <ci-fixture@invalid>', 'ed25519', 'sign', '1d'], env=signing_env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        socket_rows = []
+        for role in ['socketdir', 'agent-socket', 'agent-extra-socket', 'agent-browser-socket']:
+            witness = subprocess.run([TOOLS['gpgconf']['resolved'], '--homedir', str(signing_home), '--list-dirs', role], env=signing_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            # Only the source-defined directory selector's path is public; stderr is hashed.
+            raw_path = witness.stdout.rstrip(b'\r\n')
+            if witness.returncode == 0 and (not raw_path or len(raw_path) > 4096 or any(c < 32 or c == 127 for c in raw_path) or re.search(rb'%(?![0-9A-Fa-f]{2})', raw_path)):
+                raise RuntimeError('Malformed GnuPG socket selector output')
+            socket_rows.append({'role': role, 'exit': witness.returncode, 'percentEncodedSelector': raw_path.decode(errors='strict') if witness.returncode == 0 else None, 'encodedBytes': len(raw_path), 'stderrSHA256': hashlib.sha256(witness.stderr).hexdigest(), 'stderrBytes': len(witness.stderr)})
+        proof['fixtureSigning']['socketDirectories'] = socket_rows
+        generate = subprocess.Popen([TOOLS['gpg']['resolved'], '--batch', '--pinentry-mode', 'loopback', '--passphrase', '', '--quick-generate-key', 'NimAgents CI fixture <ci-fixture@invalid>', 'ed25519', 'sign', '1d'], env=signing_env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        _, generation_error = generate.communicate()
+        # GnuPG 2.4.9 agent/gpg literals: emit fixed classifications, never stderr text.
+        classifications = {
+            'socketNameTooLong': b"socket name '" in generation_error and b"' is too long" in generation_error,
+            'socketPreparationFailed': b'error preparing socket' in generation_error,
+            'socketCreationFailed': b"can't create socket" in generation_error,
+            'socketBindingFailed': b'error binding socket' in generation_error,
+        }
+        proof['fixtureSigning']['generation'] = {'pid': generate.pid, 'exit': generate.returncode, 'stderrSHA256': hashlib.sha256(generation_error).hexdigest(), 'stderrBytes': len(generation_error), 'classifications': classifications}
         if generate.returncode:
             raise RuntimeError('Real fixture signing-key generation failed')
         keys = subprocess.check_output([TOOLS['gpg']['resolved'], '--batch', '--with-colons', '--list-secret-keys'], env=signing_env, stderr=subprocess.DEVNULL).decode().splitlines()
