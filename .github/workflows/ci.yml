@@ -86,8 +86,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          nix eval --raw .#ci-managed-hook-constructor.drvPath
-          nix build .#ci-managed-hook-constructor --no-link --max-jobs 1 --print-build-logs --print-out-paths
+          witness_python="$(nix build .#ci-constructor-witness-python --no-link --max-jobs 1 --print-out-paths)/bin/python3"
+          "$witness_python" -I ci/arm-constructor-memory.py "$(command -v nix)" .repro/ci-arm-constructor-memory.json
       - run: nix develop --command just test 2>&1 | tee test.log
         working-directory: ${{ env.NIM_CI_NAMESPACE }}/nim-agents
         shell: bash
@@ -114,6 +114,7 @@ jobs:
             ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/probe-shared-policy.txt
             ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/result.txt
             ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-sample-transition.json
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-arm-constructor-memory.json
   lint:
     strategy:
       fail-fast: false
@@ -179,8 +180,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          nix eval --raw .#ci-managed-hook-constructor.drvPath
-          nix build .#ci-managed-hook-constructor --no-link --max-jobs 1 --print-build-logs --print-out-paths
+          witness_python="$(nix build .#ci-constructor-witness-python --no-link --max-jobs 1 --print-out-paths)/bin/python3"
+          "$witness_python" -I ci/arm-constructor-memory.py "$(command -v nix)" .repro/ci-arm-constructor-memory.json
       - run: nix develop --command just lint 2>&1 | tee lint.log
         working-directory: ${{ env.NIM_CI_NAMESPACE }}/nim-agents
         shell: bash
@@ -207,6 +208,7 @@ jobs:
             ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/probe-shared-policy.txt
             ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-git-authority/result.txt
             ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-sample-transition.json
+            ${{ env.NIM_CI_NAMESPACE }}/nim-agents/.repro/ci-arm-constructor-memory.json
   nix-build:
     strategy:
       fail-fast: false

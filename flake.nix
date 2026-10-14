@@ -208,6 +208,7 @@
             '';
           };
           packages.ci-managed-hook-constructor = managedHookConstructor;
+          packages.ci-constructor-witness-python = pkgs.python3;
           packages.ci-native-contract-utilities = pkgs.symlinkJoin {
             name = "nim-native-contract-utilities";
             paths = [

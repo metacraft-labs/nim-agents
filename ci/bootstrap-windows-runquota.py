@@ -188,6 +188,17 @@ def unchanged_package(key):
     if actual != STATE['packages'][key]['members']: raise RuntimeError('Changed bootstrap runtime/header payload')
     if file_identity(OWNED / (key + '.zip')) != STATE['packages'][key]['archive']: raise RuntimeError('Changed bootstrap archive')
 
+def bootstrap_compiler_activation(compiler):
+    compiler = Path(compiler)
+    if not compiler.is_absolute() or any(c in str(compiler) for c in ('\r', '\n', '\0')):
+        raise RuntimeError('Malformed bootstrap compiler activation path')
+    if os.environ.get('REPRO_BOOTSTRAP_CC'):
+        raise RuntimeError('Foreign inherited bootstrap compiler authority')
+    expected = STATE['compilerImages'].get(str(compiler))
+    if expected is None or file_identity(compiler) != expected:
+        raise RuntimeError('Changed authenticated bootstrap compiler image')
+    return 'REPRO_BOOTSTRAP_CC=' + str(compiler) + '\n'
+
 def main():
     global OWNED, RECEIPT_PARENT
     if os.name != 'nt' or platform.machine().lower() not in ('amd64', 'x86_64') or os.environ.get('RUNNER_ARCH') != 'X64':
@@ -303,8 +314,12 @@ def main():
     if STATE['owningAfter'] != STATE['owningBefore']: raise RuntimeError('Changed owning source/index/event')
     for path, expected in STATE['compilerImages'].items():
         if file_identity(path) != expected: raise RuntimeError('Changed bootstrap compiler image')
+    STATE['bootstrapCompilerBinding'] = {'selector': 'REPRO_BOOTSTRAP_CC',
+        'scope': 'SDK recipe/provider bootstrap only; final GCC action profile unchanged',
+        'image': STATE['compilerImages'][str(gcc)]}
+    bootstrap_compiler_activation(gcc)
     verify_directories(); STATE['success'] = True
-    return backend, daemon
+    return backend, daemon, gcc
 
 if __name__ == '__main__':
     result = None
@@ -334,7 +349,7 @@ if __name__ == '__main__':
                         s = os.fstat(out.fileno())
                         if (s.st_dev, s.st_ino) != (STATE['githubEnvironmentBefore']['dev'], STATE['githubEnvironmentBefore']['ino']):
                             raise RuntimeError('Changed environment file identity')
-                        out.write('REPRO_FULL_CLI=' + str(result[0]) + '\nRUNQUOTAD_BIN=' + str(result[1]) + '\n')
+                        out.write('REPRO_FULL_CLI=' + str(result[0]) + '\nRUNQUOTAD_BIN=' + str(result[1]) + '\n' + bootstrap_compiler_activation(result[2]))
                         out.flush(); os.fsync(out.fileno())
         for kernel, handle, _, _, _ in reversed(HELD): kernel.CloseHandle(handle)
         if STATE.get('terminalGuardFailure'): raise RuntimeError('Terminal root authority refused; unknown paths preserved')
