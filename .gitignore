@@ -13,3 +13,10 @@ result
 
 # Repro development environment cache
 .repro/
+
+# Exact generated binaries declared by repro.nim.
+/build/test-bin/test_agents
+/build/test-bin/test_consumers
+/build/test-bin/test_native_stdio_acp_transport
+/build/test-bin/test_codex_acp_smoke
+/build/test-bin/test_inject_prompt_client
