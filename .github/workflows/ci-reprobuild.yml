@@ -123,7 +123,7 @@ jobs:
           workspace-directory: "${{ runner.os != 'Windows' && env.NIM_CI_NAMESPACE || '.' }}"
           gh-token: ${{ steps.ci_token.outputs.token }}
           repro-from-source: ${{ runner.os != 'Windows' && 'true' || 'false' }}
-          repro-build-pin: ${{ runner.os != 'Windows' && '76659f5730ecf698b1963c656494d2cb66eb256d' || 'dev' }}
+          repro-build-pin: ${{ runner.os != 'Windows' && '064daf5b154ea6a0758ddb2dcbcbc07685216e44' || 'dev' }}
 
       - name: Refresh the owning installation token after SDK preparation
         if: runner.os != 'Windows'

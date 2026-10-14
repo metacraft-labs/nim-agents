@@ -60,7 +60,7 @@ if effective_initial.stdout.strip() and local_initial.returncode != 0:
 
 # The supported constructor supplies complete canonical bytes. No private
 # renderer imports, token normalization, or platform-store hash catalog.
-with tempfile.TemporaryDirectory(prefix='nim-agents-canonical-hook-factory-') as directory:
+with tempfile.TemporaryDirectory(prefix='nim-agents-canonical-hook-factory-', dir=ROOT.parent) as directory:
     fixture = Path(directory)
     refuse_workspace_target(fixture)
     subprocess.run([str(SELECTED_GIT),'init','--template='+str(TEMPLATES),str(fixture)],check=True,stdout=subprocess.DEVNULL)
