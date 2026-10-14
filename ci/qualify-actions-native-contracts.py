@@ -210,7 +210,7 @@ try:
         proof['toolsBefore'] = TOOLS
         temp_root = Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
         temp_identity = directory(temp_root)
-        signing_home = Path(tempfile.mkdtemp(prefix='nim-native-fixture-signing-', dir=temp_root))
+        signing_home = Path(tempfile.mkdtemp(prefix='nim-sign-', dir=temp_root))
         signing_identity = directory(signing_home)
         signing_fd = os.open(signing_home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         signing_stat = os.fstat(signing_fd)
@@ -218,8 +218,12 @@ try:
             raise RuntimeError('Foreign signing fixture owner')
         if os.path.commonpath([str(signing_home), str(RECEIPTS)]) == str(RECEIPTS):
             raise RuntimeError('Signing keys overlap archived receipts')
-        if signing_home.parent != temp_root or not signing_home.name.startswith('nim-native-fixture-signing-'):
+        if signing_home.parent != temp_root or not signing_home.name.startswith('nim-sign-'):
             raise RuntimeError('Foreign signing fixture namespace')
+        # Darwin sockaddr_un.sun_path is 104 bytes including the terminator.
+        # https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/sys/un.h
+        # The browser socket is the longest default selector; keep the private
+        # unique home short and refuse an overlong runner temp root, never fallback.
         # The workflow archives nim-native-utilities-*/receipt.json and
         # native-runquota-* logs, not this separate private signing prefix.
         proof['fixtureSigning'] = {'home': signing_identity, 'owner': signing_stat.st_uid, 'scope': 'Exclusive private signing namespace outside declared artifact roots'}
@@ -233,6 +237,11 @@ try:
             raw_path = witness.stdout.rstrip(b'\r\n')
             if witness.returncode == 0 and (not raw_path or len(raw_path) > 4096 or any(c < 32 or c == 127 for c in raw_path) or re.search(rb'%(?![0-9A-Fa-f]{2})', raw_path)):
                 raise RuntimeError('Malformed GnuPG socket selector output')
+            if witness.returncode == 0:
+                from urllib.parse import unquote_to_bytes
+                socket_path_bytes = unquote_to_bytes(raw_path)
+                if any(c < 32 or c == 127 for c in socket_path_bytes) or (sys.platform == "darwin" and len(socket_path_bytes) >= 104):
+                    raise RuntimeError("Selected signing socket exceeds Darwin path capacity")
             socket_rows.append({'role': role, 'exit': witness.returncode, 'percentEncodedSelector': raw_path.decode(errors='strict') if witness.returncode == 0 else None, 'encodedBytes': len(raw_path), 'stderrSHA256': hashlib.sha256(witness.stderr).hexdigest(), 'stderrBytes': len(witness.stderr)})
         proof['fixtureSigning']['socketDirectories'] = socket_rows
         # Capture only the agent diagnostic channel in this private disposable home.
