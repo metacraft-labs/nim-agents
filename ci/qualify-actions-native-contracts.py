@@ -235,16 +235,39 @@ try:
                 raise RuntimeError('Malformed GnuPG socket selector output')
             socket_rows.append({'role': role, 'exit': witness.returncode, 'percentEncodedSelector': raw_path.decode(errors='strict') if witness.returncode == 0 else None, 'encodedBytes': len(raw_path), 'stderrSHA256': hashlib.sha256(witness.stderr).hexdigest(), 'stderrBytes': len(witness.stderr)})
         proof['fixtureSigning']['socketDirectories'] = socket_rows
+        # Capture only the agent diagnostic channel in this private disposable home.
+        # GnuPG 2.4.9 agent/gpg-agent.c oLogFile supports this without debug output.
+        agent_log = signing_home / "agent-diagnostic.log"
+        with agent_log.open("xb") as log:
+            os.fchmod(log.fileno(), 0o600)
+            agent_log_stat = os.fstat(log.fileno())
+        if any(c in str(agent_log) for c in "\r\n\x00"):
+            raise RuntimeError("Invalid private diagnostic path")
+        with (signing_home / "gpg-agent.conf").open("x") as config:
+            os.chmod(config.name, 0o600)
+            config.write("log-file " + str(agent_log) + "\n")
         generate = subprocess.Popen([TOOLS['gpg']['resolved'], '--batch', '--pinentry-mode', 'loopback', '--passphrase', '', '--quick-generate-key', 'NimAgents CI fixture <ci-fixture@invalid>', 'ed25519', 'sign', '1d'], env=signing_env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         _, generation_error = generate.communicate()
         # GnuPG 2.4.9 agent/gpg literals: emit fixed classifications, never stderr text.
+        agent_fd = os.open(agent_log, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            agent_stat = os.fstat(agent_fd)
+            if (agent_stat.st_dev, agent_stat.st_ino) != (agent_log_stat.st_dev, agent_log_stat.st_ino) or not stat.S_ISREG(agent_stat.st_mode) or agent_stat.st_uid != os.getuid() or stat.S_IMODE(agent_stat.st_mode) != 0o600 or agent_stat.st_size > 65536:
+                raise RuntimeError("Foreign or unbounded private agent diagnostic")
+            agent_error = os.read(agent_fd, 65537)
+            agent_after = os.fstat(agent_fd)
+            if len(agent_error) > 65536 or agent_after.st_size > 65536 or agent_after.st_size != len(agent_error) or (agent_after.st_dev, agent_after.st_ino, agent_after.st_uid, agent_after.st_mode, agent_after.st_mtime_ns) != (agent_stat.st_dev, agent_stat.st_ino, agent_stat.st_uid, agent_stat.st_mode, agent_stat.st_mtime_ns):
+                raise RuntimeError("Changed or unbounded private agent diagnostic snapshot")
+        finally:
+            os.close(agent_fd)
+        diagnostic_error = generation_error + agent_error
         classifications = {
-            'socketNameTooLong': b"socket name '" in generation_error and b"' is too long" in generation_error,
-            'socketPreparationFailed': b'error preparing socket' in generation_error,
-            'socketCreationFailed': b"can't create socket" in generation_error,
-            'socketBindingFailed': b'error binding socket' in generation_error,
+            'socketNameTooLong': b"socket name '" in diagnostic_error and b"' is too long" in diagnostic_error,
+            'socketPreparationFailed': b'error preparing socket' in diagnostic_error,
+            'socketCreationFailed': b"can't create socket" in diagnostic_error,
+            'socketBindingFailed': b'error binding socket' in diagnostic_error,
         }
-        proof['fixtureSigning']['generation'] = {'pid': generate.pid, 'exit': generate.returncode, 'stderrSHA256': hashlib.sha256(generation_error).hexdigest(), 'stderrBytes': len(generation_error), 'classifications': classifications}
+        proof['fixtureSigning']['generation'] = {'pid': generate.pid, 'exit': generate.returncode, 'stderrSHA256': hashlib.sha256(generation_error).hexdigest(), 'stderrBytes': len(generation_error), 'classifications': classifications, 'privateAgentLogSHA256': hashlib.sha256(agent_error).hexdigest(), 'privateAgentLogBytes': len(agent_error)}
         if generate.returncode:
             raise RuntimeError('Real fixture signing-key generation failed')
         keys = subprocess.check_output([TOOLS['gpg']['resolved'], '--batch', '--with-colons', '--list-secret-keys'], env=signing_env, stderr=subprocess.DEVNULL).decode().splitlines()
