@@ -188,14 +188,21 @@ def darwin_session_members(sid):
     for line in output.splitlines():
         try:
             fields = line.split()
-            require(len(fields) == 3 and fields[0].isdigit() and int(fields[0]) > 0
-                    and fields[2][0] in "DIRSTUZ", "Malformed native process row")
+            require(len(fields) == 3 and fields[0].isdigit() and int(fields[0]) > 0,
+                    "Malformed native process row")
             darwin_numeric_uid(fields[1])
             pid = int(fields[0])
             require(pid not in seen, "Duplicate native process row")
             seen.add(pid)
+            # Kernel membership must precede state interpretation: a ps snapshot
+            # can retain an exiting PID after it is gone, or describe an unrelated
+            # session whose Mach thread state is unavailable. Neither is evidence
+            # of an owned survivor. Live unresolved OWNED state still fails closed.
             actual_sid = os.getsid(pid)
-            if fields[2][0] != "Z" and actual_sid == sid:
+            if actual_sid != sid:
+                continue
+            require(fields[2][0] in "DIRSTUZ", "Unknown live owned process state")
+            if fields[2][0] != "Z":
                 live.append(str(pid))
         except ProcessLookupError:
             continue
