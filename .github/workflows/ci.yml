@@ -80,6 +80,14 @@ jobs:
         working-directory: ${{ env.NIM_CI_NAMESPACE }}/nim-agents
         shell: bash
         run: GIT_OPTIONAL_LOCKS=0 nix run .#prepare-ci-hook-samples -- .repro/ci-git-authority > .repro/ci-sample-transition.json
+      - name: Realize the declared managed hook constructor
+        if: runner.os == 'Linux' && runner.arch == 'ARM64'
+        working-directory: ${{ env.NIM_CI_NAMESPACE }}/nim-agents
+        shell: bash
+        run: |
+          set -euo pipefail
+          nix eval --raw .#ci-managed-hook-constructor.drvPath
+          nix build .#ci-managed-hook-constructor --no-link --max-jobs 1 --print-build-logs --print-out-paths
       - run: nix develop --command just test 2>&1 | tee test.log
         working-directory: ${{ env.NIM_CI_NAMESPACE }}/nim-agents
         shell: bash
@@ -165,6 +173,14 @@ jobs:
         working-directory: ${{ env.NIM_CI_NAMESPACE }}/nim-agents
         shell: bash
         run: GIT_OPTIONAL_LOCKS=0 nix run .#prepare-ci-hook-samples -- .repro/ci-git-authority > .repro/ci-sample-transition.json
+      - name: Realize the declared managed hook constructor
+        if: runner.os == 'Linux' && runner.arch == 'ARM64'
+        working-directory: ${{ env.NIM_CI_NAMESPACE }}/nim-agents
+        shell: bash
+        run: |
+          set -euo pipefail
+          nix eval --raw .#ci-managed-hook-constructor.drvPath
+          nix build .#ci-managed-hook-constructor --no-link --max-jobs 1 --print-build-logs --print-out-paths
       - run: nix develop --command just lint 2>&1 | tee lint.log
         working-directory: ${{ env.NIM_CI_NAMESPACE }}/nim-agents
         shell: bash

@@ -207,6 +207,7 @@
               ${ownRepoOnly guardedHookInstall}
             '';
           };
+          packages.ci-managed-hook-constructor = managedHookConstructor;
           packages.ci-native-contract-utilities = pkgs.symlinkJoin {
             name = "nim-native-contract-utilities";
             paths = [
