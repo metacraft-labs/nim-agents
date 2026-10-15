@@ -163,6 +163,9 @@ package nim_agents:
       "clang >=14"
     else:
       "gcc >=12"
+    # The unchanged legacy cross-checks run through repro exec. Declare their
+    # runner so Windows resolves the SDK's authenticated just package.
+    "just >=1"
 
     # Sibling Nim-library producers (SC-11 develop-mode from-source
     # consumption). ``src/nim_agents/client.nim`` + ``src/nim_agents.nim`` +
