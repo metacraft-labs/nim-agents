@@ -6,6 +6,7 @@ paths := "--path:src --path:../nim-everywhere/src --path:../nim-acp/src --path:.
 build: build-native build-js
 
 build-native:
+    nim c {{paths}} tests/test_acp_launch_prefix.nim
     nim c {{paths}} tests/test_agents.nim
     nim c {{paths}} tests/test_consumers.nim
     nim c {{paths}} tests/test_session_load_client.nim
@@ -22,6 +23,10 @@ build-js:
 test: test-native test-js
 
 test-native:
+    nim c -r {{paths}} tests/test_activity.nim
+    nim c -r {{paths}} tests/test_acp_launch_prefix.nim
+    nim c -r {{paths}} tests/test_harbor_lifecycle_threads.nim
+    nim c -r {{paths}} tests/test_harbor_rest_native.nim
     nim c -r {{paths}} tests/test_agents.nim
     nim c -r {{paths}} tests/test_consumers.nim
     nim c -r {{paths}} tests/test_session_load_client.nim
@@ -31,13 +36,18 @@ test-native:
     nim c -r {{paths}} tests/test_nimcache_is_worktree_local.nim
 
 test-js:
+    bash tools/nim-js-test-gate.sh {{paths}} tests/test_activity.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_agents.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_consumers.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_session_load_client.nim
 
-lint: lint-nim lint-nix
+lint: lint-nim lint-nix lint-ci-metadata
+
+lint-ci-metadata:
+    python3 -B tests/test_ci_initial_samples_uid.py
 
 lint-nim:
+    nim check {{paths}} tests/test_acp_launch_prefix.nim
     nim check {{paths}} tests/test_agents.nim
     nim check {{paths}} tests/test_consumers.nim
     nim check {{paths}} tests/test_session_load_client.nim
@@ -60,3 +70,8 @@ format-nix:
 bump-version version:
     sed -i "s/^version       = .*/version       = \"{{version}}\"/" nim_agents.nimble
     printf "%s\n" "{{version}}" > VERSION
+
+# Entering the dev shell from another git repository must write nothing there.
+# Runs `nix develop`, so it is not part of the in-shell test recipes.
+test-dev-shell:
+    bash tests/test_dev_shell_writes_nothing_elsewhere.sh
