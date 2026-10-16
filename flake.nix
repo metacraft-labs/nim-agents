@@ -32,7 +32,9 @@
       perSystem =
         { pkgs, system, ... }:
         let
-          # git-hooks.nix installs `.pre-commit-config.yaml` and git hooks into
+          # Keep the incoming portable configuration as tracked source. Native
+          # hooks use the complete Nix standard set plus this repository's lint.
+          # The hooks are installed into
           # `git rev-parse --show-toplevel` of the directory the shell is entered
           # from, so `nix develop /path/to/<this repo>` run inside another checkout
           # would plant this repository's hooks there. `ownRepoOnly` runs a snippet
@@ -82,9 +84,24 @@
                 })
             else
               pkgs.prek;
+          previousFullPreCommit = git-hooks.lib.${system}.run {
+            src = ./.;
+            package = nativePrek;
+            hooks = standardHooks // {
+              check-merge-conflicts.enable = true;
+              lint = {
+                enable = true;
+                name = "just lint";
+                entry = "just lint";
+                language = "system";
+                pass_filenames = false;
+              };
+            };
+          };
           preCommit = git-hooks.lib.${system}.run {
             src = ./.;
             package = nativePrek;
+            configPath = ".pre-commit-config.nix.yaml";
             hooks = standardHooks // {
               check-merge-conflicts.enable = true;
               lint = {
@@ -128,7 +145,7 @@
                 done
               '';
           expectedNativeHook = nativeHookFactory preCommit;
-          expectedLegacyNativeHook = nativeHookFactory legacyPreCommit;
+          expectedLegacyNativeHook = nativeHookFactory previousFullPreCommit;
           hookOwnershipGuard = ./nix/hook-ownership-guard.py;
           hookTransaction = ./nix/hook-transaction.py;
           actualNativeInstaller = pkgs.writeShellScript "nim-agents-native-hook-installer" preCommit.shellHook;
@@ -139,7 +156,7 @@
               exit 1
             fi
             export REPROBUILD_REPRO="${managedHookConstructor}/bin/repro"
-            ${pkgs.python3}/bin/python3 ${hookTransaction} "$_own_repo_root" ${hookOwnershipGuard} ${expectedNativeHook} ${pkgs.git}/share/git-core/templates ${expectedLegacyNativeHook} ${preCommit.config.configFile} ${legacyPreCommit.config.configFile} ${actualNativeInstaller} ${pkgs.git}/bin/git ${pkgs.bash}/bin/bash >&2
+            ${pkgs.python3}/bin/python3 ${hookTransaction} "$_own_repo_root" ${hookOwnershipGuard} ${expectedNativeHook} ${pkgs.git}/share/git-core/templates ${expectedLegacyNativeHook} ${preCommit.config.configFile} ${previousFullPreCommit.config.configFile} ${actualNativeInstaller} ${pkgs.git}/bin/git ${pkgs.bash}/bin/bash >&2
             _nim_agents_hook_status=$?
             if [ "$_nim_agents_hook_status" -ne 0 ]; then
               unset _nim_agents_hook_status
@@ -190,6 +207,10 @@
             };
           };
           devShells.default = pkgs.mkShell {
+            NIM_AGENTS_FULL_HOOK_CONFIG = preCommit.config.configFile;
+            NIM_AGENTS_HOOK_INSTALLER = pkgs.writeShellScript "nim-agents-guarded-hook-installer" (
+              ownRepoOnly guardedHookInstall
+            );
             packages =
               preCommit.enabledPackages
               ++ (with pkgs; [
@@ -202,11 +223,13 @@
                 bash
                 python3
                 prek
+                uv
               ]);
             shellHook = ''
               ${ownRepoOnly guardedHookInstall}
             '';
           };
+          packages.native-hook-config = preCommit.config.configFile;
           packages.ci-managed-hook-constructor = managedHookConstructor;
           packages.ci-constructor-witness-python = pkgs.python3;
           packages.ci-native-contract-utilities = pkgs.symlinkJoin {

@@ -129,7 +129,15 @@ type
     serial: bool
 
 const agentsTestSpecs: seq[AgentsTestSpec] = @[
+  AgentsTestSpec(source: "tests/test_harbor_lifecycle_threads.nim",
+    binary: "build/test-bin/test_harbor_lifecycle_threads", serial: true),
+  AgentsTestSpec(source: "tests/test_harbor_rest_native.nim",
+    binary: "build/test-bin/test_harbor_rest_native", serial: true),
   # Pure-API unittest suites — no OS gate, no subprocess; parallel-safe.
+  AgentsTestSpec(source: "tests/test_acp_launch_prefix.nim",
+    binary: "build/test-bin/test_acp_launch_prefix", serial: true),
+  AgentsTestSpec(source: "tests/test_activity.nim",
+    binary: "build/test-bin/test_activity", serial: false),
   AgentsTestSpec(source: "tests/test_agents.nim",
     binary: "build/test-bin/test_agents", serial: false),
   AgentsTestSpec(source: "tests/test_consumers.nim",
@@ -166,6 +174,7 @@ package nim_agents:
     # The unchanged legacy cross-checks run through repro exec. Declare their
     # runner so Windows resolves the SDK's authenticated just package.
     "just >=1"
+    "python3 >=3.9"
 
     # Sibling Nim-library producers (SC-11 develop-mode from-source
     # consumption). ``src/nim_agents/client.nim`` + ``src/nim_agents.nim`` +
@@ -221,7 +230,8 @@ package nim_agents:
         binary = binary,
         paths = @["src"],
         actionId = "nim_agents.test_build." & stem,
-        extraInputs = @["src", "nim_agents.nimble"])
+        extraInputs = @["src", "nim_agents.nimble", "tests/harbor_lifecycle_peer.py",
+          "tests/harbor_rest_fixture.py"])
       when defined(macosx):
         appendRegisteredActionToolIdentityRefs(edge.action.id, ["clang"])
       elif defined(linux) or defined(windows):

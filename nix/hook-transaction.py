@@ -84,8 +84,14 @@ common=pathlib.Path(git('rev-parse','--path-format=absolute','--git-common-dir')
 hooks=common/'hooks';gitconfig=common/'config';index=git('ls-files','--stage','-z')
 original={p.name:plain_file(p) for p in hooks.iterdir()}
 original_config=plain_file(gitconfig)
-config_link=root/'.pre-commit-config.yaml'
+config_link=root/'.pre-commit-config.nix.yaml'
 original_link=os.readlink(config_link) if config_link.is_symlink() else None
+def link_principal(path):
+  info=path.lstat()
+  if not stat.S_ISLNK(info.st_mode): raise RuntimeError('Expected exact generated symlink principal')
+  return [info.st_dev,info.st_ino,info.st_uid,stat.S_IMODE(info.st_mode),os.readlink(path)]
+original_link_principal=link_principal(config_link) if original_link is not None else None
+native_config_identity=plain_file(pathlib.Path(config))
 def directory_identity(path):
   info=path.lstat()
   if not stat.S_ISDIR(info.st_mode): raise RuntimeError('Non-directory authority '+str(path))
@@ -127,9 +133,12 @@ try:
   (ctx/'prepared.json').write_bytes(receipt)
   tool=run('tool',[sys.executable,guard,*[str(root),native,'tool','reserved',templates,legacy,config,legacy_config]]).decode().strip()
   needed=not(config_link.is_symlink() and os.readlink(config_link)==config)
-  # Retire only exact prior produced locals while the original full config
-  # remains selected. The snapshot already retains their complete backup bytes.
-  if original_link==legacy_config:
+  # The prior full hook bodies embed the old default configuration path.
+  # The incoming tracked config now occupies that path; retire only the exact
+  # full legacy pair, whose immutable config and complete bytes are retained.
+  legacy_slots=[name+'.repro-local' for name in ('pre-commit','pre-push')]
+  legacy_present=[name for name in legacy_slots if name in original and original[name]=={'mode':0o755,'bytes':legacy_factory_identity[name.removesuffix('.repro-local')]['bytes']}]
+  if legacy_present:
     retirement=[]
     for name in ('pre-commit','pre-push'):
       slot=name+'.repro-local'
@@ -146,10 +155,25 @@ try:
       if tracked_source_identity()!=original_source or git('ls-files','--stage','-z')!=index: raise RuntimeError('Retirement source/index changed')
       current_config=plain_file(gitconfig)
       if current_config['mode']!=original_config['mode'] or base64.b64decode(current_config['bytes']) not in allowed_configs: raise RuntimeError('Retirement Git configuration unknown')
-      if not config_link.is_symlink() or os.readlink(config_link)!=original_link: raise RuntimeError('Retirement original config link changed')
+      if original_link is None:
+        if config_link.exists() or config_link.is_symlink(): raise RuntimeError('Retirement generated config appeared')
+      elif not config_link.is_symlink() or os.readlink(config_link)!=original_link:
+        raise RuntimeError('Retirement original config link changed')
       if plain_file(pathlib.Path(legacy_config))!=legacy_config_identity: raise RuntimeError('Retirement prior config source changed')
       if {path.name:plain_file(path) for path in pathlib.Path(legacy).iterdir()}!=legacy_factory_identity: raise RuntimeError('Retirement prior factory source changed')
       for path in retirement: path.unlink()
+      needed=True
+      # The public installer keys convergence on the config symlink, not on
+      # hook bodies. Reinstall after exact legacy retirement even when both
+      # complete configurations happen to have identical immutable bytes.
+      if original_link==config:
+        if link_principal(config_link)!=original_link_principal: raise RuntimeError('Generated config symlink principal changed')
+        if plain_file(pathlib.Path(config))!=native_config_identity: raise RuntimeError('Generated full config authority changed')
+        if tracked_source_identity()!=original_source or git('ls-files','--stage','-z')!=index: raise RuntimeError('Config invalidation source/index changed')
+        if [directory_identity(root),directory_identity(common),directory_identity(hooks)]!=original_directory_authority: raise RuntimeError('Config invalidation directory authority changed')
+        remaining={name:item for name,item in original.items() if name not in {path.name for path in retirement}}
+        if {path.name:plain_file(path) for path in hooks.iterdir()}!=remaining: raise RuntimeError('Config invalidation hook inventory changed')
+        config_link.unlink()
   native_global=ctx/'native-installer-empty-global'
   native_global.write_bytes(b'');native_global.chmod(0o600)
   native_env=dict(os.environ)

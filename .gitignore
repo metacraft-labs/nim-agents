@@ -1,5 +1,4 @@
 .direnv/
-.pre-commit-config.yaml
 nimcache/
 # Per-checkout nimcache (config.nims): every Nim compile in this checkout
 # keeps its intermediate files here, never in the shared ~/.cache/nim.
@@ -20,3 +19,6 @@ result
 /build/test-bin/test_native_stdio_acp_transport
 /build/test-bin/test_codex_acp_smoke
 /build/test-bin/test_inject_prompt_client
+
+# Exact Nix-generated full hook configuration; portable source stays tracked.
+/.pre-commit-config.nix.yaml

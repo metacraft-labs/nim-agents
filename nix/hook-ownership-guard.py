@@ -137,7 +137,7 @@ def census():
     native = {name: hashlib.sha256((EXPECTED_NATIVE / name).read_bytes()).hexdigest() for name in ('pre-commit','pre-push')}
     legacy_native = {name: hashlib.sha256((EXPECTED_LEGACY_NATIVE / name).read_bytes()).hexdigest() for name in ('pre-commit','pre-push')}
     refuse_workspace_target(ROOT)
-    generated_config = ROOT / '.pre-commit-config.yaml'
+    generated_config = ROOT / '.pre-commit-config.nix.yaml'
     config_identity = None
     if generated_config.exists() or generated_config.is_symlink():
         if not generated_config.is_symlink():
