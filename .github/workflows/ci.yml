@@ -50,6 +50,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: metacraft-labs/nim-acp
+          ref: 9e7ad381570048712584631fba78d482475cae99
           path: ${{ env.NIM_CI_NAMESPACE }}/nim-acp
       - uses: actions/checkout@v4
         with:
@@ -147,6 +148,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: metacraft-labs/nim-acp
+          ref: 9e7ad381570048712584631fba78d482475cae99
           path: ${{ env.NIM_CI_NAMESPACE }}/nim-acp
       - uses: actions/checkout@v4
         with:

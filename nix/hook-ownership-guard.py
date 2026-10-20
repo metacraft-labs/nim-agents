@@ -44,6 +44,40 @@ for path in (TEMPLATES / 'hooks').iterdir():
     SAMPLES[path.name] = [stat.S_IMODE(info.st_mode), hashlib.sha256(path.read_bytes()).hexdigest()]
 
 
+
+def sample_inventory(hooks, templates):
+    """Authenticate inactive Git samples without inferring their historical umask.
+
+    Git v2.53.0 copy.c:copy_file maps executable templates to creation0777
+    (otherwise0666), then applies the process umask and shared permissions.
+    All selected templates have the same executable base; shared regular-file
+    adjustments are deterministic ordinary bits too. A coherent mask checks
+    the inventory, but cannot prove an earlier chmod never occurred.
+    """
+    result = {}
+    masked_on = masked_off = 0
+    for path in sorted(hooks.iterdir()):
+        if not path.name.endswith('.sample'):
+            continue
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            raise RuntimeError('Nonregular selected Git sample: ' + path.name)
+        expected = templates.get(path.name)
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        mode = stat.S_IMODE(info.st_mode)
+        if expected is None or digest != expected[1]:
+            raise RuntimeError('Unknown selected Git sample body: ' + path.name)
+        base = 0o777 if expected[0] & 0o111 else 0o666
+        if mode & ~base:
+            raise RuntimeError('Invalid selected Git sample creation mode: ' + path.name)
+        masked_on |= base & ~mode
+        masked_off |= mode
+        if masked_on & masked_off:
+            raise RuntimeError('Incoherent selected Git sample creation modes')
+        result[path.name] = [mode, digest, info.st_uid, info.st_gid]
+    return result
+
+
 def refuse_workspace_target(path):
     if (path / '.repro/workspace.toml').exists() or (path / '.repro-workspace.toml').exists():
         raise RuntimeError('Hook constructor target declares a workspace')
@@ -64,16 +98,11 @@ with tempfile.TemporaryDirectory(prefix='nim-agents-canonical-hook-factory-', di
     fixture = Path(directory)
     refuse_workspace_target(fixture)
     subprocess.run([str(SELECTED_GIT),'init','--template='+str(TEMPLATES),str(fixture)],check=True,stdout=subprocess.DEVNULL)
-    initialized_samples = {}
-    for sample in (fixture / '.git/hooks').iterdir():
-        info = sample.lstat()
-        digest = hashlib.sha256(sample.read_bytes()).hexdigest() if stat.S_ISREG(info.st_mode) else None
-        if sample.name not in SAMPLES or digest != SAMPLES[sample.name][1]:
-            raise RuntimeError('Selected Git initialized an unexpected template body')
-        initialized_samples[sample.name] = [stat.S_IMODE(info.st_mode), digest]
+    if {path.name for path in (fixture / '.git/hooks').iterdir()} != set(SAMPLES):
+        raise RuntimeError('Selected Git initialized an unexpected factory entry')
+    initialized_samples = sample_inventory(fixture / '.git/hooks', SAMPLES)
     if set(initialized_samples) != set(SAMPLES):
         raise RuntimeError('Selected Git initialized an incomplete template inventory')
-    SAMPLES = initialized_samples
     for sample in (fixture / '.git/hooks').iterdir():
         sample.unlink()
     factory_hooks = fixture / '.git/hooks'
@@ -81,7 +110,7 @@ with tempfile.TemporaryDirectory(prefix='nim-agents-canonical-hook-factory-', di
     actual_factory_hooks = subprocess.check_output([str(SELECTED_GIT),'-C',str(fixture),'rev-parse','--path-format=absolute','--git-path','hooks'],text=True).strip()
     if Path(actual_factory_hooks).resolve(strict=True) != factory_hooks.resolve(strict=True):
         raise RuntimeError('Canonical factory hooksPath escaped its owned directory')
-    subprocess.run([str(CONSTRUCTOR),'hooks','ensure','--vcs',str(fixture)],check=True,stdout=subprocess.DEVNULL)
+    subprocess.run([str(CONSTRUCTOR),'hooks','ensure','--vcs',str(fixture)],check=True,stdout=subprocess.DEVNULL,umask=0o022)
     hooks = fixture / '.git/hooks'
     expected_names = {name + suffix for name in HOOK_NAMES for suffix in ('','.repro-managed')}
     if {p.name for p in hooks.iterdir()} != expected_names:
@@ -151,6 +180,7 @@ def census():
         config_identity = {'target':str(config_target),'sha256':hashlib.sha256(config_target.read_bytes()).hexdigest(),'lexicalTarget':os.readlink(generated_config)}
     elif MODE in ('native','after'):
         raise RuntimeError('Expected genuine generated hook configuration is absent')
+    samples = sample_inventory(hooks, SAMPLES)
     result = {}
     for path in sorted(hooks.iterdir()):
         info = path.lstat()
@@ -159,8 +189,8 @@ def census():
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         mode = stat.S_IMODE(info.st_mode)
         if path.name.endswith('.sample'):
-            if SAMPLES.get(path.name) != [mode, digest]:
-                raise RuntimeError('Unknown selected Git sample body or mode: ' + path.name)
+            if samples.get(path.name) != [mode, digest, info.st_uid, info.st_gid]:
+                raise RuntimeError('Selected Git sample changed during census: ' + path.name)
         else:
             known = set()
             if path.name in MANAGED:
@@ -195,7 +225,7 @@ def census():
         if len(tokens) != 1:
             raise RuntimeError('Missing or ambiguous managed hook contract')
         subprocess.run([str(actual),'hooks','protocol','--require=2','--hook-contract='+tokens.pop()],check=True,stdout=subprocess.DEVNULL)
-    return {'generatedConfig':config_identity,'entries':result,'repro':[str(actual),hashlib.sha256(actual.read_bytes()).hexdigest()], 'git':[str(SELECTED_GIT),GIT_SHA], 'gitTemplates':{'path':str(TEMPLATES),'samples':SAMPLES}}
+    return {'generatedConfig':config_identity,'entries':result,'sampleIdentities':samples,'repro':[str(actual),hashlib.sha256(actual.read_bytes()).hexdigest()], 'git':[str(SELECTED_GIT),GIT_SHA], 'gitTemplates':{'path':str(TEMPLATES),'samples':SAMPLES}}
 
 
 import json
@@ -203,12 +233,14 @@ before = census()
 if MODE == 'prepare':
     initial = before
     if not any(name in before['entries'] for name in MANAGED):
-        subprocess.run([str(CONSTRUCTOR),'hooks','ensure','--vcs',str(ROOT)],check=True,stdout=sys.stderr)
+        subprocess.run([str(CONSTRUCTOR),'hooks','ensure','--vcs',str(ROOT)],check=True,stdout=sys.stderr,umask=0o022)
         MODE = 'before'
         before = census()
         for name, identity in initial['entries'].items():
             if before['entries'].get(name) != identity:
                 raise RuntimeError('Canonical bootstrap changed an original template sample')
+        if before['sampleIdentities'] != initial['sampleIdentities']:
+            raise RuntimeError('Canonical bootstrap changed original sample ownership or contents')
         before['initialEmptyInventory'] = initial
     print(json.dumps(before, sort_keys=True))
 elif MODE in ('before','snapshot','rollback'):
@@ -227,6 +259,8 @@ elif MODE == 'after':
             raise RuntimeError('Expected actual native local hook is absent: ' + hook)
     if original['repro'] != before['repro'] or original['git'] != before['git'] or original['gitTemplates'] != before['gitTemplates']:
         raise RuntimeError('Managed hook tool changed during installation')
+    if original['sampleIdentities'] != before['sampleIdentities']:
+        raise RuntimeError('Installer changed original sample ownership or contents')
     for name in set(original['entries']) | set(before['entries']):
         if name in ('pre-commit.legacy','pre-push.legacy') and name not in original['entries']:
             main = name.removesuffix('.legacy')

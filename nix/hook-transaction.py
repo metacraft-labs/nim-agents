@@ -30,11 +30,11 @@ def drain():
       except KeyboardInterrupt: continue
   active=None; last_sid=None
 
-def run(label,argv,child_env=None):
+def run(label,argv,child_env=None,child_umask=-1):
   global active,last_sid
   item={'label':label,'argv':argv,'creation':'Popen start_new_session=True; direct waitpid-owned child','controller_uid':os.getuid()};stages.append(item)
   with (ctx/(label+'.stdout')).open('wb') as out,(ctx/(label+'.stderr')).open('wb') as err:
-    active=subprocess.Popen(argv,cwd=root,stdout=out,stderr=err,start_new_session=True,env=child_env)
+    active=subprocess.Popen(argv,cwd=root,stdout=out,stderr=err,start_new_session=True,env=child_env,umask=child_umask)
     last_sid=active.pid;item['pid']=active.pid;item['sid']=last_sid
     try:
       try:
@@ -198,7 +198,7 @@ try:
   run('native-install',[bash_exe,installer],native_env)
   if native_global.read_bytes()!=b'': raise RuntimeError('Native installer mutated private empty global')
   if needed: run('native-check',[sys.executable,guard,*[str(root),native,'native','reserved',templates,legacy,config,legacy_config]])
-  run('managed-reconcile',[tool,'hooks','ensure','--vcs',str(root)])
+  run('managed-reconcile',[tool,'hooks','ensure','--vcs',str(root)],child_umask=0o022)
   # Preserve original linked-worktree repair inside exact transaction authority.
   if git('config','--local','--get','core.hooksPath').decode().strip()=='.git/hooks':
     run('relative-to-common-hookspath',[git_exe,'-C',str(root),'config','--local','core.hooksPath',str(hooks)])

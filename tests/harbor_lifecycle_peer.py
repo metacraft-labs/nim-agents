@@ -38,7 +38,7 @@ class Peer(BaseHTTPRequestHandler):
                 time.sleep(.002)
         terminal = (root/'terminal').read_text() if (root/'admitted').exists() else 'paused'
         data = ''.join('data: '+json.dumps({'type':'status','status':s})+'\n\n'
-                       for s in ['running',terminal]).encode()
+                        for s in ['running',terminal]).encode()
         self.send_response(200)
         self.send_header('Content-Type','text/event-stream')
         self.send_header('Content-Length',str(len(data)))

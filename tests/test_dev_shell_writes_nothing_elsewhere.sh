@@ -19,6 +19,7 @@
 #
 #   bash tests/test_dev_shell_writes_nothing_elsewhere.sh
 set -euo pipefail
+initial_umask="$(umask)"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
@@ -64,5 +65,24 @@ expected_config="$(cd "$REPO" && direnv exec "$REPO" bash -c '
 [ -L "$REPO/.pre-commit-config.nix.yaml" ] \
   && [ "$(readlink "$REPO/.pre-commit-config.nix.yaml")" = "$expected_config" ] \
   || fail "control: native hooks do not select the exact full generated configuration"
+
+
+# All supported managed constructor slots retain canonical executable modes,
+# even when the caller deliberately restricts creation permissions.
+python3 - "$hooks_dir" <<'PYTHON'
+from pathlib import Path
+import stat, sys
+hooks = Path(sys.argv[1])
+for name in ('pre-commit', 'pre-push', 'post-commit', 'post-checkout', 'post-merge'):
+    for suffix in ('', '.repro-managed'):
+        path = hooks / (name + suffix)
+        info = path.lstat()
+        assert stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o755, path
+PYTHON
+[ "$(umask)" = "$initial_umask" ] || fail "hook installation changed the caller umask"
+if [ "${1:-}" != --restrictive-umask ]; then
+  ( umask 077; bash "$REPO/tests/test_dev_shell_writes_nothing_elsewhere.sh" --restrictive-umask )
+  [ "$(umask)" = "$initial_umask" ] || fail "restrictive-mask regression changed the caller umask"
+fi
 
 echo "PASS: entered from another repository the dev shell writes nothing there; from this one it installs its hooks"

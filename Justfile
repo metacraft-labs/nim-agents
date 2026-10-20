@@ -74,4 +74,5 @@ bump-version version:
 # Entering the dev shell from another git repository must write nothing there.
 # Runs `nix develop`, so it is not part of the in-shell test recipes.
 test-dev-shell:
+    python3 -B tests/test_git_sample_modes.py
     bash tests/test_dev_shell_writes_nothing_elsewhere.sh
