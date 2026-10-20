@@ -21,5 +21,10 @@ result
 /build/test-bin/test_codex_acp_smoke
 /build/test-bin/test_inject_prompt_client
 
+/build/test-bin/test_acp_launch_prefix
+/build/test-bin/test_activity
+/build/test-bin/test_harbor_lifecycle_threads
+/build/test-bin/test_harbor_rest_native
+
 # Exact Nix-generated full hook configuration; portable source stays tracked.
 /.pre-commit-config.nix.yaml
