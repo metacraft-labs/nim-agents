@@ -2,7 +2,7 @@ import std/json
 import std/strutils
 import std/uri
 when not defined(js):
-  import std/os
+  import std/[os, atomics, locks]
 import nim_acp
 import nim_agent_harbor
 import nim_everywhere
@@ -18,10 +18,35 @@ type
     aakClaude = "claude"
     aakCodex = "codex"
     aakCustom = "custom"
+  AgentEventCursor* = ref object
+    value*: int
+  AgentSessionLifecycle* = enum
+    aslReady, aslFailed, aslClosing, aslClosed
+  AgentTurnState* = enum
+    atsIdle, atsWorking, atsCompleted, atsFailed
+  AgentSessionRuntime* = ref object
+    delivering: bool
+    when defined(js):
+      lifecycleValue: AgentSessionLifecycle
+      turnValue: AgentTurnState
+    else:
+      stateLock: Lock
+      deliveryFinished: Cond
+      lifecycleValue: Atomic[AgentSessionLifecycle]
+      turnValue: Atomic[AgentTurnState]
+  AgentSessionCapabilities* = object
+    persistent*: bool
+    cancelTurn*: bool
+    closeSession*: bool
   AgentSession* = object
     id*: string
     taskId*: string
     backend*: AgentBackendKind
+    eventCursor*: AgentEventCursor
+    capabilities*: AgentSessionCapabilities
+    runtime*: AgentSessionRuntime
+  PromptRejectedError* = object of HarborError
+    response*: PromptAcceptedResponse
   PromptTurn* = object
     session*: AgentSession
     stopReason*: StopReason
@@ -59,6 +84,8 @@ type
     aekError = "error"
     aekCancelled = "cancelled"
     aekCompleted = "completed"
+  AgentPresentationField* = object
+    name*, value*: string
   AgentEvent* = object
     sessionId*: string
     kind*: AgentEventKind
@@ -80,6 +107,14 @@ type
     workspacePath*: string
     workingCopyMode*: string
     stopReason*: StopReason
+    presentationFields*: seq[AgentPresentationField]
+    sourceType*: string ## Safe backend event discriminator, never inferred from text.
+    eventId*: string ## Durable stream identity when the backend provides it.
+    toolArguments*: string ## Presentation copy with credential/config fields removed.
+    model*, usageSource*: string
+    inputTokens*, outputTokens*: int
+    hasUsage*: bool
+    question*: string
     raw*: JsonNode
   AgentWorkspaceContext* = object
     tenantId*: string
@@ -92,6 +127,7 @@ type
     executionHostId*: string
     workingCopyMode*: string
   HarborAcpAgentConfig* = object
+    software*: string ## Empty keeps the existing external ACP-agent selection.
     model*: string
     version*: string
     displayName*: string
@@ -99,11 +135,13 @@ type
     args*: seq[string]
     settings*: JsonNode
   HarborTaskConfig* = object
+    allowNetwork*: bool
     workspace*: AgentWorkspaceContext
     prompt*: seq[ContentBlock]
     acpAgent*: HarborAcpAgentConfig
     labels*: JsonNode
   AgentStartMode* = object
+    allowNetwork*: bool
     workspace*: AgentWorkspaceContext
     prompt*: seq[ContentBlock]
     acpAgent*: HarborAcpAgentConfig
@@ -204,6 +242,67 @@ type
 proc fromAcp*(client: AcpClient): AgentClient =
   AgentClient(backend: abkAcp, acp: client)
 
+proc lifecycle*(state: AgentSessionRuntime): AgentSessionLifecycle =
+  when defined(js): state.lifecycleValue
+  else: state.lifecycleValue.load()
+
+proc `lifecycle=`(state: AgentSessionRuntime; value: AgentSessionLifecycle) =
+  when defined(js): state.lifecycleValue = value
+  else: state.lifecycleValue.store(value)
+
+proc turn*(state: AgentSessionRuntime): AgentTurnState =
+  when defined(js): state.turnValue
+  else: state.turnValue.load()
+
+proc `turn=`(state: AgentSessionRuntime; value: AgentTurnState) =
+  when defined(js): state.turnValue = value
+  else: state.turnValue.store(value)
+
+proc newSessionRuntime(): AgentSessionRuntime =
+  result = AgentSessionRuntime()
+  when not defined(js):
+    initLock(result.stateLock)
+    initCond(result.deliveryFinished)
+  result.lifecycle = aslReady
+  result.turn = atsWorking
+
+template withSessionState(state: AgentSessionRuntime; body: untyped) =
+  when defined(js):
+    body
+  else:
+    withLock state.stateLock:
+      body
+
+proc finishTurn(state: AgentSessionRuntime; reason: StopReason) =
+  if state == nil: return
+  withSessionState(state):
+    if state.lifecycle != aslClosed:
+      state.turn = if reason in {srEndTurn, srMaxTokens}: atsCompleted else: atsFailed
+      if reason notin {srEndTurn, srMaxTokens} and state.lifecycle != aslClosing:
+        state.lifecycle = aslFailed
+
+proc admitTurn(state: AgentSessionRuntime) =
+  if state == nil: return
+  withSessionState(state):
+    if state.lifecycle != aslReady:
+      raise newException(HarborError, "Session is not ready for another prompt")
+    if state.turn == atsWorking:
+      raise newException(HarborError, "A turn is already running")
+    state.turn = atsWorking
+
+proc beginDelivery(state: AgentSessionRuntime) =
+  if state == nil: return
+  withSessionState(state):
+    if state.lifecycle != aslReady:
+      raise newException(HarborError, "Session closed before prompt delivery")
+    state.delivering = true
+
+proc endDelivery(state: AgentSessionRuntime) =
+  if state == nil: return
+  withSessionState(state):
+    state.delivering = false
+    when not defined(js): broadcast(state.deliveryFinished)
+
 proc shutdown*(client: var AgentClient) {.gcsafe.} =
   ## Release any resources the agent client holds.  For
   ## :const:`abkAcp` clients this terminates the underlying ACP
@@ -226,7 +325,8 @@ when not defined(js):
   proc fromStdioAcpAgent*(cmd: string; args: openArray[string] = [];
       defaultTimeoutMs = -1;
       idleTimeoutMs = DefaultNativeStdioTimeoutMs;
-      hardDeadlineMs = DefaultNativeStdioHardDeadlineMs): AgentClient =
+      hardDeadlineMs = DefaultNativeStdioHardDeadlineMs;
+      launchPrefix: seq[string] = @[]): AgentClient =
     ## Generic factory: spawn ``cmd`` (a stdio-speaking ACP server)
     ## with ``args`` and wrap it in an :type:`AgentClient`. ``cmd`` is
     ## resolved via :proc:`findExe` when it looks like a bare binary
@@ -241,20 +341,29 @@ when not defined(js):
     ## ``defaultTimeoutMs`` parameter is still accepted as an alias for
     ## ``idleTimeoutMs`` for backwards compatibility — when non-
     ## negative it overrides the explicit ``idleTimeoutMs`` value.
+    # Optional prefix wraps the resolved provider executable without changing
+    # provider choice, argument order or ACP transport timeout semantics.
     if cmd.len == 0:
       raise newException(AcpError,
         "fromStdioAcpAgent: empty command")
+    # Resolve the documented explicit override BEFORE applying a launch prefix.
+    # The lower transport must not replace the wrapper executable afterward.
+    let selected = getEnv("ISONIM_ACP_AGENT_CMD", cmd)
     let resolved =
-      if cmd.contains(DirSep) or fileExists(cmd): cmd
-      else: findExe(cmd)
+      if selected.contains(DirSep) or fileExists(selected): selected
+      else: findExe(selected)
     if resolved.len == 0:
       raise newException(AcpError,
         "fromStdioAcpAgent: command not found on PATH: " & cmd)
-    let argsSeq = @args
-    let transport = newNativeStdioAcpTransport(resolved, argsSeq,
+    var launchBinary = resolved
+    var argsSeq = @args
+    if launchPrefix.len > 0:
+      launchBinary = launchPrefix[0]
+      argsSeq = launchPrefix[1 .. ^1] & @[resolved] & argsSeq
+    let transport = newNativeStdioAcpTransport(launchBinary, argsSeq,
       defaultTimeoutMs = defaultTimeoutMs,
       idleTimeoutMs = idleTimeoutMs,
-      hardDeadlineMs = hardDeadlineMs)
+      hardDeadlineMs = hardDeadlineMs, allowCommandOverride = false)
     fromAcp(newAcpClient(transport))
 
   proc resolveFirstOnPath(candidates: openArray[string]): string =
@@ -270,7 +379,8 @@ when not defined(js):
   proc fromClaudeCodeAcp*(extraArgs: seq[string] = @[];
       defaultTimeoutMs = -1;
       idleTimeoutMs = DefaultNativeStdioTimeoutMs;
-      hardDeadlineMs = DefaultNativeStdioHardDeadlineMs): AgentClient =
+      hardDeadlineMs = DefaultNativeStdioHardDeadlineMs;
+      launchPrefix: seq[string] = @[]): AgentClient =
     ## Convenience factory that spawns the ``claude-code-acp`` (formerly
     ## ``@anthropic-ai/claude-code-acp``, now packaged in nixpkgs as
     ## ``claude-agent-acp``) binary as an ACP-speaking subprocess and
@@ -289,12 +399,13 @@ when not defined(js):
     fromStdioAcpAgent(binary, extraArgs,
       defaultTimeoutMs = defaultTimeoutMs,
       idleTimeoutMs = idleTimeoutMs,
-      hardDeadlineMs = hardDeadlineMs)
+      hardDeadlineMs = hardDeadlineMs, launchPrefix = launchPrefix)
 
   proc fromCodexAcp*(extraArgs: seq[string] = @[];
       defaultTimeoutMs = -1;
       idleTimeoutMs = DefaultNativeStdioTimeoutMs;
-      hardDeadlineMs = DefaultNativeStdioHardDeadlineMs): AgentClient =
+      hardDeadlineMs = DefaultNativeStdioHardDeadlineMs;
+      launchPrefix: seq[string] = @[]): AgentClient =
     ## Sibling of :proc:`fromClaudeCodeAcp` for the OpenAI Codex ACP
     ## adapter (``pkgs.codex-acp`` in nixpkgs).  Resolution order:
     ## ``$ISONIM_CODEX_ACP_CMD`` env → ``findExe("codex-acp")``.
@@ -310,13 +421,14 @@ when not defined(js):
     fromStdioAcpAgent(binary, extraArgs,
       defaultTimeoutMs = defaultTimeoutMs,
       idleTimeoutMs = idleTimeoutMs,
-      hardDeadlineMs = hardDeadlineMs)
+      hardDeadlineMs = hardDeadlineMs, launchPrefix = launchPrefix)
 
   proc fromAcpAgent*(kind: AcpAgentKind; extraArgs: seq[string] = @[];
       cmd: string = ""; args: seq[string] = @[];
       defaultTimeoutMs = -1;
       idleTimeoutMs = DefaultNativeStdioTimeoutMs;
-      hardDeadlineMs = DefaultNativeStdioHardDeadlineMs): AgentClient =
+      hardDeadlineMs = DefaultNativeStdioHardDeadlineMs;
+      launchPrefix: seq[string] = @[]): AgentClient =
     ## Kind-discriminated convenience entry point so HTTP handlers,
     ## CLI dispatchers and tests can switch backends with a single
     ## ``case`` rather than an if/else tree.
@@ -332,12 +444,12 @@ when not defined(js):
       fromClaudeCodeAcp(extraArgs,
         defaultTimeoutMs = defaultTimeoutMs,
         idleTimeoutMs = idleTimeoutMs,
-        hardDeadlineMs = hardDeadlineMs)
+        hardDeadlineMs = hardDeadlineMs, launchPrefix = launchPrefix)
     of aakCodex:
       fromCodexAcp(extraArgs,
         defaultTimeoutMs = defaultTimeoutMs,
         idleTimeoutMs = idleTimeoutMs,
-        hardDeadlineMs = hardDeadlineMs)
+        hardDeadlineMs = hardDeadlineMs, launchPrefix = launchPrefix)
     of aakCustom:
       if cmd.len == 0:
         raise newException(AcpError,
@@ -347,7 +459,7 @@ when not defined(js):
       fromStdioAcpAgent(cmd, combined,
         defaultTimeoutMs = defaultTimeoutMs,
         idleTimeoutMs = idleTimeoutMs,
-        hardDeadlineMs = hardDeadlineMs)
+        hardDeadlineMs = hardDeadlineMs, launchPrefix = launchPrefix)
 
 proc toHarborContentBlock*(item: ContentBlock): HarborContentBlock =
   case item.kind
@@ -369,11 +481,28 @@ proc toHarborContentBlocks*(items: openArray[ContentBlock]): seq[
     result.add item.toHarborContentBlock()
 
 proc promptText*(items: openArray[ContentBlock]): string =
+  ## Harbor accepts a string prompt. Preserve resource identity as one JSON
+  ## context line without fetching URIs; JSON escaping prevents embedded URI
+  ## or MIME newlines from changing the block framing. Text-only bytes retain
+  ## their existing representation and order.
   for item in items:
-    if item.kind == cbText and item.text.len > 0:
+    var blockText: string
+    case item.kind
+    of cbText:
+      blockText = item.text
+    of cbResource:
+      if item.uri.len == 0:
+        raise newException(ValueError, "resource context requires a nonempty URI")
+      var resource = %*{"uri": item.uri}
+      if item.mimeType.len > 0:
+        resource["mimeType"] = %item.mimeType
+      blockText = "resource: " & $resource
+    else:
+      discard
+    if blockText.len > 0:
       if result.len > 0:
         result.add "\n\n"
-      result.add item.text
+      result.add blockText
 
 proc defaultWorkspaceContext*(cwd = ""): AgentWorkspaceContext =
   AgentWorkspaceContext(repoMode: "none", cwd: cwd)
@@ -416,7 +545,7 @@ proc acpAgentConfig*(binary: string; args: seq[string] = @[];
     settings: if settings == nil: newJObject() else: settings)
 
 proc harborAgentConfig*(config: HarborAcpAgentConfig): AgentConfig =
-  result = defaultAgent("acp", config.model)
+  result = defaultAgent(if config.software.len > 0: config.software else: "acp", config.model)
   result.agent.version = if config.version.len >
       0: config.version else: "latest"
   result.displayName = config.displayName
@@ -426,6 +555,26 @@ proc harborAgentConfig*(config: HarborAcpAgentConfig): AgentConfig =
       binary: config.binary,
       args: config.args)
 
+proc harborPromptText*(items: openArray[ContentBlock]): string =
+  # REST accepts one string. Preserve canonical resource identity and admitted
+  # textual content through the existing ordered text-block representation.
+  # No resource URI is opened and no new resource JSON fields are introduced.
+  var expanded: seq[ContentBlock]
+  for item in items:
+    case item.kind
+    of cbText:
+      expanded.add item
+    of cbResource:
+      if item.data.len > 0 and not (item.mimeType.startsWith("text/") or
+          item.mimeType == "application/json"):
+        raise newException(HarborError, "Harbor REST prompts cannot embed binary resources")
+      expanded.add item
+      if item.data.len > 0:
+        expanded.add textBlock(item.data)
+    else:
+      raise newException(HarborError, "Harbor REST prompts currently support text and textual resource references only")
+  promptText(expanded)
+
 proc buildHarborTaskRequest*(config: HarborTaskConfig): CreateTaskRequest =
   let repoMode =
     if config.workspace.repoMode.len > 0: config.workspace.repoMode
@@ -434,7 +583,7 @@ proc buildHarborTaskRequest*(config: HarborTaskConfig): CreateTaskRequest =
   result = CreateTaskRequest(
     tenantId: config.workspace.tenantId,
     projectId: config.workspace.projectId,
-    prompt: promptText(config.prompt),
+    prompt: harborPromptText(config.prompt),
     repo: RepoConfig(
       mode: repoMode,
       url: config.workspace.repoUrl,
@@ -449,6 +598,7 @@ proc buildHarborTaskRequest*(config: HarborTaskConfig): CreateTaskRequest =
     agents: @[harborAgentConfig(config.acpAgent)],
     output: defaultOutput(),
     labels: if config.labels == nil: newJObject() else: config.labels)
+  result.sandbox.allowNetwork = config.allowNetwork
   if config.workspace.cwd.len > 0:
     result.labels["cwd"] = %config.workspace.cwd
 
@@ -465,7 +615,7 @@ proc harborWorktreeTaskConfig*(cwd: string; prompt: seq[ContentBlock];
 
 proc stopReasonFromStatus(status: string): StopReason =
   case status
-  of "cancelled": srCancelled
+  of "cancelled", "stopped": srCancelled
   of "failed", "error": srError
   else: srEndTurn
 
@@ -498,11 +648,95 @@ proc progressFromRaw(raw: JsonNode): tuple[done: int; total: int] =
     raw{"done"}.getInt(0)))
   result.total = raw{"total"}.getInt(raw{"totalMilestones"}.getInt(0))
 
+proc presentationArguments(node: JsonNode): JsonNode =
+  ## Tool arguments are content, but environment/config/auth values must not cross
+  ## the presentation boundary. Preserve structure while removing these fields.
+  if node == nil: return newJNull()
+  case node.kind
+  of JObject:
+    result = newJObject()
+    for key, value in node.pairs:
+      let name = key.toLowerAscii()
+      if name.contains("token") or name.contains("password") or
+          name.contains("secret") or name.contains("credential") or
+          name in ["env", "environment", "authorization", "headers", "settings", "config"]:
+        result[key] = %"[private]"
+      else: result[key] = presentationArguments(value)
+  of JArray:
+    result = newJArray()
+    for value in node.items: result.add presentationArguments(value)
+  else: result = node
+
 proc harborEventToAgentEvent*(sessionId: string;
     event: HarborEvent): AgentEvent =
   result.sessionId = sessionId
   result.status = event.status
   result.raw = event.raw
+  result.sourceType = event.raw{"type"}.getStr($event.kind)
+  result.eventId = event.raw{"eventId"}.getStr("")
+  # Explicit presentation allowlists for the full SessionEvent REST union.
+  # Credential-account names, auth surfaces, provider configuration and arbitrary
+  # payload/innerEvent objects never enter this projection.
+  let fields = case result.sourceType
+    of "llm_request": @["messageCount", "hasToolCalls"]
+    of "tool_result": @["exit_code"]
+    of "file_read": @["file_path", "start_line", "end_line"]
+    of "diff": @["oldText", "newText", "oldTextHead", "oldTextTail", "newTextHead", "newTextTail", "truncated"]
+    of "turn_complete": @["stop_reason", "input_tokens", "output_tokens"]
+    of "delegation": @["kind", "activeSubAgents", "totalSubAgents"]
+    of "orchestration": @["kind", "targetSessionId"]
+    of "sub_agent": @["subAgentId", "parentSessionId"]
+    of "fleet_fence": @["kind", "fenceId", "durationMs"]
+    of "fleet_host": @["kind", "host", "os", "command", "exitCode", "stream"]
+    of "session_awaiting_input", "agent_question": @["request", "kind"]
+    of "session_resumed": @["deliverer"]
+    of "session_ended": @["outcome"]
+    of "proxy_credential_rotated": @["provider", "triggerStatus"]
+    of "proxy_rate_limit_absorbed": @["attempts", "cumulativeWaitMs"]
+    of "dispatcher_restarted": @["restartSeq"]
+    of "anti_halting_resume_confirmed": @["stallType"]
+    of "session_leadership_migrated": @["sourceExecutor", "targetExecutor", "targetOs", "flushedSeq"]
+    of "participant": @["kind", "display_name", "transition"]
+    of "context_injection": @["tag"]
+    of "login_required": @["provider", "request"]
+    of "context_files": @["kind", "totalCount"]
+    else: newSeq[string]()
+  for key in fields:
+    let value = event.raw{key}
+    if value != nil and value.kind in {JString, JInt, JBool}:
+      result.presentationFields.add AgentPresentationField(name: key,
+        value: if value.kind == JString: value.getStr() else: $value)
+  if result.sourceType == "context_files":
+    let files = event.raw{"files"}
+    if files != nil and files.kind == JArray:
+      for file in files.items:
+        if file{"path"} != nil and file{"path"}.kind == JString:
+          result.presentationFields.add AgentPresentationField(name: "file", value: file{"path"}.getStr())
+  if result.sourceType == "agent_question":
+    let options = event.raw{"options"}
+    if options != nil and options.kind == JArray:
+      for option in options.items:
+        let label = option{"label"}.getStr("")
+        if label.len > 0:
+          result.presentationFields.add AgentPresentationField(name: "option", value: label)
+  if result.sourceType == "plan":
+    let entries = event.raw{"entries"}
+    if entries != nil and entries.kind == JArray:
+      for entry in entries.items:
+        let content = entry{"content"}.getStr("")
+        let status = entry{"status"}.getStr("")
+        if content.len > 0 and status.len > 0:
+          result.presentationFields.add AgentPresentationField(name: content, value: status)
+  if result.sourceType == "link_spans":
+    let spans = event.raw{"spans"}
+    if spans != nil and spans.kind == JArray:
+      for span in spans.items:
+        let targets = span{"targets"}
+        if targets != nil and targets.kind == JArray:
+          for target in targets.items:
+            let path = target{"path"}.getStr("")
+            if path.len > 0:
+              result.presentationFields.add AgentPresentationField(name: "path", value: path)
   case event.kind
   of hekThought:
     result.kind = aekThoughtChunk
@@ -514,6 +748,12 @@ proc harborEventToAgentEvent*(sessionId: string;
     result.kind = aekToolCall
     result.toolCallId = event.toolExecutionId
     result.toolName = event.toolName
+    let args = event.raw{"tool_args"}
+    if args != nil:
+      if args.kind == JString:
+        try: result.toolArguments = $presentationArguments(parseJson(args.getStr()))
+        except JsonParsingError: result.toolArguments = "[unstructured arguments]"
+      else: result.toolArguments = $presentationArguments(args)
     result.status = if event.status.len > 0: event.status else: "started"
   of hekToolResult:
     result.kind = aekToolCallUpdate
@@ -528,7 +768,9 @@ proc harborEventToAgentEvent*(sessionId: string;
     result.linesAdded = event.linesAdded
     result.linesRemoved = event.linesRemoved
     result.status = if event.status.len > 0: event.status else: "applied"
-    result.text = event.message
+    # The public file_edit DTO carries readable prose in description, not
+    # message. Project only that typed string; arbitrary raw fields stay private.
+    result.text = event.raw{"description"}.getStr(event.message)
   of hekDiff:
     result.kind = aekDiff
     result.filePath = event.filePath
@@ -544,11 +786,24 @@ proc harborEventToAgentEvent*(sessionId: string;
   of hekLlmRequest:
     result.kind = aekLlmRequest
     result.status = event.status
-    result.text = event.message
+    result.model = event.raw{"model"}.getStr("")
+    result.text = event.raw{"responseSummary"}.getStr(event.message)
+    let usage = event.raw{"usage"}
+    if usage != nil and usage.kind == JObject:
+      result.inputTokens = usage{"input_tokens"}.getInt(usage{"inputTokens"}.getInt(-1))
+      result.outputTokens = usage{"output_tokens"}.getInt(usage{"outputTokens"}.getInt(-1))
+      result.hasUsage = result.inputTokens >= 0 or result.outputTokens >= 0
+      result.usageSource = usage{"source"}.getStr("")
   of hekSubAgent:
     result.kind = aekSubAgent
     result.status = event.status
     result.text = event.message
+    let inner = event.raw{"innerEvent"}
+    if inner != nil and inner.kind == JObject:
+      # Only the actual inner content discriminator and readable text, never
+      # arbitrary nested configuration. Host navigation still has no fake action.
+      result.presentationFields.add AgentPresentationField(name: "event", value: inner{"type"}.getStr(""))
+      result.text = inner{"message"}.getStr(inner{"thought"}.getStr(event.message))
   of hekWorkspace, hekStatus:
     case event.status
     of "connecting", "authenticating", "connected", "streaming", "ready",
@@ -562,7 +817,7 @@ proc harborEventToAgentEvent*(sessionId: string;
       else:
         result.kind = aekConnection
         result.state = stateFromStatus(event.status)
-    of "cancelled":
+    of "cancelled", "stopped":
       result.kind = aekCancelled
       result.state = acsCancelled
       result.stopReason = srCancelled
@@ -584,9 +839,40 @@ proc harborEventToAgentEvent*(sessionId: string;
         result.kind = aekStatus
         result.state = acsStreaming
     result.text = event.message
+    if result.kind == aekError and result.text.len == 0:
+      result.text = "Harbor session " & sessionId & " failed"
   else:
     let rawType = event.raw{"type"}.getStr("")
-    if rawType == "plan":
+    if rawType == "user_input":
+      # Harbor's typed input is human activity, never assistant output. Keep
+      # its original content/raw envelope without guessing from message text.
+      result.kind = aekStatus
+      result.text = event.raw{"content"}.getStr("")
+    elif rawType == "agent_question":
+      result.kind = aekStatus
+      result.question = event.raw{"prompt"}.getStr("")
+      result.text = result.question
+    elif rawType in ["file_read", "delegation", "orchestration", "context_files",
+        "fleet_fence", "fleet_host", "session_started", "session_awaiting_input",
+        "session_resumed", "session_ended", "proxy_credential_rotated",
+        "proxy_rate_limit_absorbed", "dispatcher_restarted", "anti_halting_resume_confirmed",
+        "session_leadership_migrated", "participant", "context_injection", "login_required", "link_spans"]:
+      result.kind = aekStatus
+      result.text = event.raw{"description"}.getStr(event.raw{"output"}.getStr(event.message))
+      if rawType == "context_injection": result.text = event.raw{"text"}.getStr("")
+    elif rawType == "error":
+      result.kind = aekError
+      result.text = event.message
+      result.stopReason = srError
+    elif rawType == "turn_complete":
+      let reason = event.raw{"stop_reason"}.getStr("end_turn")
+      if reason == "tool_use":
+        result.kind = aekStatus
+      else:
+        result.kind = aekCompleted
+        result.state = acsCompleted
+        result.stopReason = parseStopReason(reason)
+    elif rawType == "plan":
       result.kind = aekPlan
       result.planEntries = jsonArrayStrings(event.raw, "entries")
     elif rawType == "milestone" or rawType == "milestone_progress":
@@ -605,7 +891,7 @@ proc harborEventToAgentEvent*(sessionId: string;
     else:
       result.kind = aekStatus
       result.text = event.message
-  if result.kind in {aekCancelled, aekCompleted, aekError}:
+  if result.kind in {aekCancelled, aekCompleted, aekError} and event.status.len > 0:
     result.stopReason = stopReasonFromStatus(event.status)
 
 proc harborEventsToAgentEvents*(sessionId: string;
@@ -638,7 +924,7 @@ proc acpUpdateToAgentEvent*(sessionId: string;
       result.kind = aekCompleted
       result.state = acsCompleted
       result.stopReason = srEndTurn
-    of "cancelled":
+    of "cancelled", "stopped":
       result.kind = aekCancelled
       result.state = acsCancelled
       result.stopReason = srCancelled
@@ -766,11 +1052,21 @@ proc toJson*(event: AgentEvent): JsonNode =
   ## into a file.  :proc:`agentEventFromJson` is its exact inverse over
   ## the fields that are carried.
   result = %*{
+    "sourceType": event.sourceType,
+    "eventId": event.eventId,
+    "toolArguments": event.toolArguments,
+    "model": event.model,
+    "usageSource": event.usageSource,
+    "hasUsage": event.hasUsage,
+    "inputTokens": event.inputTokens,
+    "outputTokens": event.outputTokens,
+    "question": event.question,
     "sessionId": event.sessionId,
     "kind": $event.kind,
     "state": $event.state,
     "text": event.text,
     "status": event.status,
+    "stopReason": $event.stopReason,
     "toolCallId": event.toolCallId,
     "toolName": event.toolName,
     "filePath": event.filePath,
@@ -789,10 +1085,24 @@ proc toJson*(event: AgentEvent): JsonNode =
   for entry in event.planEntries:
     entries.add %entry
   result["planEntries"] = entries
+  var fields = newJArray()
+  for field in event.presentationFields:
+    fields.add %*{"name": field.name, "value": field.value}
+  result["presentationFields"] = fields
 
 proc agentEventFromJson*(node: JsonNode): AgentEvent =
   result = AgentEvent(
+    sourceType: node{"sourceType"}.getStr(""),
+    eventId: node{"eventId"}.getStr(""),
+    toolArguments: node{"toolArguments"}.getStr(""),
+    model: node{"model"}.getStr(""),
+    usageSource: node{"usageSource"}.getStr(""),
+    hasUsage: node{"hasUsage"}.getBool(false),
+    inputTokens: node{"inputTokens"}.getInt(0),
+    outputTokens: node{"outputTokens"}.getInt(0),
+    question: node{"question"}.getStr(""),
     sessionId: node{"sessionId"}.getStr(""),
+    stopReason: parseStopReason(node{"stopReason"}.getStr("end_turn")),
     kind: parseAgentEventKind(node{"kind"}.getStr("status")),
     state: parseAgentConnectionState(node{"state"}.getStr("disconnected")),
     text: node{"text"}.getStr(""),
@@ -811,8 +1121,22 @@ proc agentEventFromJson*(node: JsonNode): AgentEvent =
     workspacePath: node{"workspacePath"}.getStr(""),
     workingCopyMode: node{"workingCopyMode"}.getStr(""),
     raw: node)
-  for entry in node{"planEntries"}.items:
-    result.planEntries.add entry.getStr("")
+  let fields = node{"presentationFields"}
+  if fields != nil and fields.kind == JArray:
+    for field in fields.items:
+      if field.kind == JObject:
+        result.presentationFields.add AgentPresentationField(
+          name: field{"name"}.getStr(""), value: field{"value"}.getStr(""))
+  let entries = node{"planEntries"}
+  if entries != nil and entries.kind == JArray:
+    for entry in entries.items:
+      if entry.kind == JString: result.planEntries.add entry.getStr("")
+  elif entries != nil:
+    # Malformed recognized payloads are visible diagnostics, never a fabricated
+    # turn-complete signal. The caller still waits for its actual terminal frame.
+    result.kind = aekError
+    result.text = "Malformed agent plan entries"
+    result.stopReason = srError
 
 proc toJson*(load: AgentSessionLoad): JsonNode =
   ## Serialise a resolved session for hand-off to another process.
@@ -911,20 +1235,86 @@ proc loadSession*(client: var AgentClient; sessionId: string; cwd = "";
     except HarborError as e:
       result.message = e.msg
 
+proc createSession*(client: var AgentClient; config: AgentStartMode): AgentSession =
+  ## A persistent conversation, distinct from the legacy task-launch API.
+  ## Harbor requires a first prompt; callers keep empty conversations as local drafts.
+  if client.backend != abkHarbor:
+    raise newException(AcpError, "createSession currently requires Harbor REST")
+  if config.acpAgent.binary.len == 0:
+    raise newException(HarborError, "Persistent Harbor sessions require an ACP provider launch command")
+  if config.workspace.workingCopyMode notin ["", "in_place"]:
+    raise newException(HarborError, "Persistent sessions require an existing in-place workspace")
+  let task = buildHarborTaskRequest(HarborTaskConfig(
+    workspace: config.workspace, allowNetwork: config.allowNetwork,
+    prompt: config.prompt, acpAgent: config.acpAgent, labels: config.labels))
+  let response = client.harbor.createSession(CreateSessionRequest(
+    prompt: task.prompt, workspacePath: config.workspace.cwd,
+    agent: task.agents[0], output: defaultOutput(), sandbox: task.sandbox,
+    labels: task.labels))
+  AgentSession(id: response.sessionId, backend: abkHarbor,
+    eventCursor: AgentEventCursor(),
+    runtime: newSessionRuntime(),
+    capabilities: AgentSessionCapabilities(
+      persistent: true, cancelTurn: false, closeSession: true))
+
+proc cancelTurn*(client: var AgentClient; session: AgentSession) =
+  ## Stopping the process is never a fallback for cancelling its current turn.
+  case client.backend
+  of abkAcp: client.acp.cancel(session.id)
+  of abkHarbor:
+    raise newException(HarborError, "Harbor REST does not expose process-preserving turn cancellation")
+
+proc closeSession*(client: var AgentClient; session: AgentSession) =
+  case client.backend
+  of abkHarbor:
+    var previous = aslReady
+    if session.runtime != nil:
+      withSessionState(session.runtime):
+        previous = session.runtime.lifecycle
+        if previous == aslClosed: return
+        if previous == aslClosing:
+          raise newException(HarborError, "Session closure is already pending")
+        when defined(js):
+          if session.runtime.delivering:
+            raise newException(HarborError, "Prompt delivery is pending; retry closure after admission")
+        session.runtime.lifecycle = aslClosing
+        when not defined(js):
+          while session.runtime.delivering:
+            wait(session.runtime.deliveryFinished, session.runtime.stateLock)
+    try:
+      client.harbor.stopSession(session.id)
+      if session.runtime != nil:
+        withSessionState(session.runtime):
+          session.runtime.lifecycle = aslClosed
+          session.runtime.turn = atsIdle
+    except CatchableError:
+      if session.runtime != nil:
+        withSessionState(session.runtime):
+          session.runtime.lifecycle = if session.runtime.turn == atsFailed: aslFailed else: previous
+      raise
+  of abkAcp:
+    raise newException(AcpError, "Explicit ACP session closure is not supported")
+
 proc startSession*(client: var AgentClient; cwd: string;
-    prompt: seq[ContentBlock] = @[]): AgentSession =
+    prompt: seq[ContentBlock] = @[]; systemInstructions = ""): AgentSession =
   case client.backend
   of abkAcp:
-    let session = client.acp.startSession(NewSessionRequest(cwd: cwd))
+    let meta = if systemInstructions.len > 0:
+                 %* {"systemPrompt": {"append": systemInstructions}}
+               else: nil
+    let session = client.acp.startSession(NewSessionRequest(cwd: cwd, meta: meta))
     AgentSession(id: session.sessionId, backend: abkAcp)
   of abkHarbor:
+    if systemInstructions.len > 0:
+      raise newException(HarborError, "Harbor REST task creation cannot deliver role instructions directly; use a provider launcher that supports system instructions")
     let response = client.harbor.createTask(buildHarborTaskRequest(HarborTaskConfig(
       workspace: defaultWorkspaceContext(cwd),
       prompt: prompt,
       acpAgent: acpAgentConfig(""))))
     let id = if response.sessionIds.len > 0: response.sessionIds[
         0] else: response.taskId
-    AgentSession(id: id, taskId: response.taskId, backend: abkHarbor)
+    AgentSession(id: id, taskId: response.taskId, backend: abkHarbor,
+      eventCursor: AgentEventCursor())
 
 proc startSession*(client: var AgentClient;
     config: AgentStartMode): AgentSession =
@@ -936,12 +1326,34 @@ proc startSession*(client: var AgentClient;
   of abkHarbor:
     let response = client.harbor.createTask(buildHarborTaskRequest(HarborTaskConfig(
       workspace: config.workspace,
+      allowNetwork: config.allowNetwork,
       prompt: config.prompt,
       acpAgent: config.acpAgent,
       labels: config.labels)))
     let id = if response.sessionIds.len > 0: response.sessionIds[
         0] else: response.taskId
-    AgentSession(id: id, taskId: response.taskId, backend: abkHarbor)
+    AgentSession(id: id, taskId: response.taskId, backend: abkHarbor,
+      eventCursor: AgentEventCursor())
+
+proc sendPromptStreaming*(client: var AgentClient; session: AgentSession;
+    prompt: seq[ContentBlock]; onEvent: AgentEventCallback): PromptTurn
+
+proc rejectHarborPrompt(response: PromptAcceptedResponse) {.noreturn.} =
+  var details = %* {"stopReason": response.stopReason, "operationId": (if response.operationIdNull: newJNull() else: %response.operationId),
+    "noOperation": response.noOperation,
+    "deliveryState": (if response.deliveryStateNull: newJNull() else: %response.deliveryState), "limitChars": response.limitChars,
+    "currentChars": response.currentChars, "remainingChars": response.remainingChars,
+    "usedChars": response.usedChars, "overLimitBy": response.overLimitBy}
+  if not response.operationIdPresent: details.delete("operationId")
+  if not response.deliveryStatePresent: details.delete("deliveryState")
+  else: details["deliveryStateType"] = %response.deliveryStateType
+  let reason = if response.stopReason == "context_limit":
+    "Session context budget exceeded; backend reports " & $response.remainingChars &
+      " characters remaining. Shorten optional context/message or start a new conversation. "
+    else: "Harbor rejected the follow-up prompt: "
+  var error = newException(PromptRejectedError, reason & $details)
+  error.response = response
+  raise error
 
 proc sendPrompt*(client: var AgentClient; session: AgentSession;
     prompt: seq[ContentBlock]): PromptTurn =
@@ -952,7 +1364,11 @@ proc sendPrompt*(client: var AgentClient; session: AgentSession;
     PromptTurn(session: session, stopReason: response.stopReason,
         updates: client.acp.drainUpdates())
   of abkHarbor:
-    discard client.harbor.sendPrompt(session.id, prompt.toHarborContentBlocks())
+    if session.capabilities.persistent:
+      return client.sendPromptStreaming(session, prompt, nil)
+    let accepted = client.harbor.sendPrompt(session.id, @[harborTextBlock(harborPromptText(prompt))])
+    if not accepted.accepted:
+      rejectHarborPrompt(accepted)
     PromptTurn(session: session, stopReason: srEndTurn, updates: @[])
 
 # --------------------------------------------------------------------------- #
@@ -1019,12 +1435,70 @@ proc peekQueuedInjections*(client: var AgentClient;
     raise newException(AcpError,
       "peekQueuedInjections: injection not supported on Agent Harbor backend yet")
 
+proc cancelSession*(client: var AgentClient; session: AgentSession) =
+  ## Compatibility spelling for turn cancellation; never closes the session.
+  client.cancelTurn(session)
+
+proc streamAgentTurn*(client: var AgentClient; session: AgentSession;
+    onEvent: AgentEventCallback): PromptTurn =
+  ## Consume the initial Harbor task turn, or a submitted follow-up, with a
+  ## durable cursor so the next turn does not replay earlier output.
+  if client.backend != abkHarbor:
+    raise newException(HarborError, "streamAgentTurn requires Harbor")
+  var reason = srError
+  var observedRunning = false
+  var awaitingIdle = false
+  var successfulReason = srEndTurn
+  let cursor = if session.eventCursor == nil: AgentEventCursor() else: session.eventCursor
+  let callback: HarborStreamCallback = proc(event: HarborEvent; id: string): bool =
+    if id.len > 0:
+      cursor.value = parseInt(id)
+    else:
+      inc cursor.value
+    var mapped = harborEventToAgentEvent(session.id, event)
+    if id.len > 0: mapped.eventId = id
+    if session.capabilities.persistent and mapped.kind == aekCompleted and
+        mapped.stopReason in {srEndTurn, srMaxTokens}:
+      # Durable model completion precedes the persistent worker's repromptable
+      # transition. Keep consuming this exact stream until actual paused.
+      awaitingIdle = true
+      successfulReason = mapped.stopReason
+      mapped.kind = aekStatus
+      mapped.state = acsStreaming
+    if session.capabilities.persistent and event.kind == hekStatus:
+      if event.status == "running": observedRunning = true
+      if event.status == "paused" and (observedRunning or awaitingIdle):
+        # Harbor ACP defines Paused as idle/repromptable after PromptResponse.
+        mapped.kind = aekCompleted
+        mapped.state = acsCompleted
+        mapped.stopReason = successfulReason
+        awaitingIdle = false
+      elif event.status == "completed":
+        mapped.kind = aekError
+        mapped.state = acsError
+        mapped.stopReason = srError
+        mapped.text = "Persistent agent process ended unexpectedly"
+    if onEvent != nil: onEvent(mapped)
+    if mapped.kind in {aekCompleted, aekCancelled, aekError}:
+      awaitingIdle = false
+      reason = mapped.stopReason
+      return false
+    true
+  try:
+    client.harbor.streamSessionEvents(session.id, callback, $cursor.value)
+    if awaitingIdle:
+      raise newException(HarborError, "Persistent provider stream ended before repromptable paused transition")
+    finishTurn(session.runtime, reason)
+  except CatchableError:
+    finishTurn(session.runtime, srError)
+    raise
+  PromptTurn(session: session, stopReason: reason)
+
 proc sendPromptStreaming*(client: var AgentClient; session: AgentSession;
     prompt: seq[ContentBlock];
     onEvent: AgentEventCallback): PromptTurn =
   ## Streaming variant of :proc:`sendPrompt`. ACP clients receive events as
-  ## transport notifications arrive. Harbor currently falls back to buffered
-  ## polling after the prompt completes.
+  ## transport notifications arrive. Harbor consumes incremental REST SSE.
   case client.backend
   of abkAcp:
     let sessionId = session.id
@@ -1035,16 +1509,39 @@ proc sendPromptStreaming*(client: var AgentClient; session: AgentSession;
         onEvent(acpUpdateToAgentEvent(sessionId, update))
     let response = client.acp.sendPromptStreaming(
       PromptRequest(sessionId: sessionId, prompt: prompt), handler)
-    PromptTurn(session: session, stopReason: response.stopReason,
+    result = PromptTurn(session: session, stopReason: response.stopReason,
         updates: collected)
   of abkHarbor:
-    discard client.harbor.sendPrompt(session.id, prompt.toHarborContentBlocks())
-    let mapped = harborEventsToAgentEvents(session.id,
-      client.harbor.readSessionEvents(session.id))
-    if onEvent != nil:
-      for event in mapped:
-        onEvent(event)
-    PromptTurn(session: session, stopReason: srEndTurn, updates: @[])
+    # Reserve admission before any transport call. Locks never span callbacks or
+    # HTTP, so a callback can close the session without deadlocking its stream.
+    admitTurn(session.runtime)
+    try:
+      let history = client.harbor.readEventHistory(session.id, EventHistoryQuery(limit: 1))
+      if session.eventCursor != nil: session.eventCursor.value = history.totalCount
+      let text = harborPromptText(prompt)
+      beginDelivery(session.runtime)
+      try:
+        let accepted = client.harbor.sendPrompt(session.id, @[harborTextBlock(text)])
+        if not accepted.accepted:
+          rejectHarborPrompt(accepted)
+      finally:
+        endDelivery(session.runtime)
+      result = client.streamAgentTurn(session, onEvent)
+    except PromptRejectedError as rejection:
+      if not rejection.response.accepted and rejection.response.stopReason == "context_limit" and
+          rejection.response.noOperation and rejection.response.deliveryState.len == 0 and
+          rejection.response.sessionId == session.id:
+        # This exact payload was explicitly rejected without a durable operation.
+        # Retain a usable persistent session for a deliberate edited retry.
+        if session.runtime != nil:
+          withSessionState(session.runtime):
+            if session.runtime.lifecycle == aslReady: session.runtime.turn = atsFailed
+      else:
+        finishTurn(session.runtime, srError)
+      raise
+    except CatchableError:
+      finishTurn(session.runtime, srError)
+      raise
 
 proc requireHarbor(client: AgentClient) =
   if client.backend != abkHarbor:
@@ -1224,6 +1721,14 @@ proc milestoneProgress*(client: AgentClient;
       completedMilestones: summary{"completedMilestones"}.getInt(0),
       progressPercent: summary{"progressPercent"}.getInt(0),
       raw: item)
+
+proc eventHistoryPage*(client: AgentClient; session: AgentSession;
+    limit = 0; before: int64 = 0): tuple[events: seq[AgentEvent], totalCount: int, hasMore: bool] =
+  ## Actual history boundary for consumers which must establish provider
+  ## continuity, without exposing backend raw graphs across threads.
+  client.requireHarbor()
+  let page = client.harbor.readEventHistory(session.id, EventHistoryQuery(limit: limit, before: before))
+  result = (harborEventsToAgentEvents(session.id, page.events), page.totalCount, page.hasMore)
 
 proc eventHistory*(client: AgentClient; session: AgentSession;
     limit = 0; before: int64 = 0): seq[AgentEvent] =

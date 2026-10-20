@@ -1,13 +1,30 @@
 .direnv/
-.pre-commit-config.yaml
 nimcache/
 # Per-checkout nimcache (config.nims): every Nim compile in this checkout
 # keeps its intermediate files here, never in the shared ~/.cache/nim.
 .nimcache/
 tests/test_*
 !tests/*.nim
+!tests/*.sh
+!tests/test_ci_initial_samples_uid.py
+!tests/test_git_sample_modes.py
 *.js
 result
 
 # Repro development environment cache
 .repro/
+
+# Exact generated binaries declared by repro.nim.
+/build/test-bin/test_agents
+/build/test-bin/test_consumers
+/build/test-bin/test_native_stdio_acp_transport
+/build/test-bin/test_codex_acp_smoke
+/build/test-bin/test_inject_prompt_client
+
+/build/test-bin/test_acp_launch_prefix
+/build/test-bin/test_activity
+/build/test-bin/test_harbor_lifecycle_threads
+/build/test-bin/test_harbor_rest_native
+
+# Exact Nix-generated full hook configuration; portable source stays tracked.
+/.pre-commit-config.nix.yaml
