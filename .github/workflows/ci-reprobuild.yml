@@ -15,6 +15,9 @@ name: CI (reprobuild)
 # host without any other repo-side change.
 
 on:
+  # workflow_dispatch lets a promotion candidate be measured on all five legs
+  # before its pull request exists; it never runs on `agents` by itself.
+  workflow_dispatch:
   push:
     branches: [main, dev, stable]
   pull_request:
