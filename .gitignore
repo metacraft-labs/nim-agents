@@ -11,3 +11,7 @@ result
 
 # Repro development environment cache
 .repro/
+
+# repro.nim typed test binaries (`build/test-bin/<stem>`), written by
+# `repro build` / `repro test`.
+/build/
