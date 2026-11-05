@@ -167,7 +167,13 @@ package nim_agents:
     # C back-end ``nim c`` shells out to. Sufficient for the path-mode
     # resolver under ``nix develop``.
     "nim >=2.0"
-    "gcc >=12"
+    when defined(macosx):
+      "clang >=14"
+    else:
+      "gcc >=12"
+    # The unchanged legacy cross-checks run through repro exec. Declare their
+    # runner so Windows resolves the SDK's authenticated just package.
+    "just >=1"
     "python3 >=3.9"
 
     # Sibling Nim-library producers (SC-11 develop-mode from-source
@@ -226,6 +232,11 @@ package nim_agents:
         actionId = "nim_agents.test_build." & stem,
         extraInputs = @["src", "nim_agents.nimble", "tests/harbor_lifecycle_peer.py",
           "tests/harbor_rest_fixture.py"])
+      when defined(macosx):
+        appendRegisteredActionToolIdentityRefs(edge.action.id, ["clang"])
+      elif defined(linux) or defined(windows):
+        # Bind the real platform C backend to this exact typed compile.
+        appendRegisteredActionToolIdentityRefs(edge.action.id, ["gcc"])
       buildActions.add(edge.action)
       # ``registerImplicitName = false`` because the BUILD edge already owns
       # the binary basename as the implicit target name; the explicit
@@ -240,6 +251,12 @@ package nim_agents:
           edge.testBinary.run(
             actionId = "nim_agents.test_execute." & stem,
             registerImplicitName = false)
+      # The test binaries start real Python peers (the ACP launch-prefix
+      # wrapper and provider, harbor_lifecycle_peer.py, harbor_rest_fixture.py)
+      # and look `python3` up on PATH. An execute action's PATH holds only the
+      # tools it names, so without this the suite found no python3
+      # (`findExe("python3") == ""` in test_acp_launch_prefix).
+      appendRegisteredActionToolIdentityRefs(executeEdge.id, ["python3"])
       executeActions.add(executeEdge)
 
     for spec in agentsTestSpecs:
