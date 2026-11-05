@@ -22,29 +22,30 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      # Siblings (nim-acp, nim-agent-harbor, nim-everywhere) are cloned by
+      # setup-dev-env at the revisions repro.lock pins. The old per-repo
+      # `actions/checkout path: ../<sibling>` steps are refused by
+      # actions/checkout ("Repository path ... is not under ..."), and they
+      # took each sibling's default branch rather than the locked revision.
+      - name: Mint installation token for cross-repo sibling clones
+        id: ci_token
+        uses: actions/create-github-app-token@v2
         with:
-          repository: metacraft-labs/nim-everywhere
-          path: ../nim-everywhere
-      - uses: actions/checkout@v4
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+      - name: Setup dev env (nix flavor)
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
         with:
-          repository: metacraft-labs/nim-acp
-          path: ../nim-acp
-      - uses: actions/checkout@v4
-        with:
-          repository: metacraft-labs/nim-agent-harbor
-          path: ../nim-agent-harbor
-      - name: Setup Nix
-        uses: metacraft-labs/devops-modules/.github/setup-nix@dev
-        with:
-          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          env-flavor: nix
+          gh-token: ${{ steps.ci_token.outputs.token }}
           substituters: ${{ vars.SUBSTITUTERS }}
-          nix-github-token: ${{ secrets.GITHUB_TOKEN }}
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
       # `shell: bash` is load-bearing, not style. The default `run` shell is
       # `bash -e` WITHOUT pipefail, so `cmd | tee` takes tee's exit status and a
       # failing command was reported as a passing job. `shell: bash` selects
       # `bash --noprofile --norc -eo pipefail`.
-      - run: nix develop --command just test 2>&1 | tee test.log
+      - run: dev-exec just test 2>&1 | tee test.log
         shell: bash
       - uses: actions/upload-artifact@v4
         if: always()
@@ -59,26 +60,27 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      # Siblings (nim-acp, nim-agent-harbor, nim-everywhere) are cloned by
+      # setup-dev-env at the revisions repro.lock pins. The old per-repo
+      # `actions/checkout path: ../<sibling>` steps are refused by
+      # actions/checkout ("Repository path ... is not under ..."), and they
+      # took each sibling's default branch rather than the locked revision.
+      - name: Mint installation token for cross-repo sibling clones
+        id: ci_token
+        uses: actions/create-github-app-token@v2
         with:
-          repository: metacraft-labs/nim-everywhere
-          path: ../nim-everywhere
-      - uses: actions/checkout@v4
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+      - name: Setup dev env (nix flavor)
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
         with:
-          repository: metacraft-labs/nim-acp
-          path: ../nim-acp
-      - uses: actions/checkout@v4
-        with:
-          repository: metacraft-labs/nim-agent-harbor
-          path: ../nim-agent-harbor
-      - name: Setup Nix
-        uses: metacraft-labs/devops-modules/.github/setup-nix@dev
-        with:
-          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          env-flavor: nix
+          gh-token: ${{ steps.ci_token.outputs.token }}
           substituters: ${{ vars.SUBSTITUTERS }}
-          nix-github-token: ${{ secrets.GITHUB_TOKEN }}
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
       # See the note on the first tee'd step: without pipefail, `| tee` masks failure.
-      - run: nix develop --command just lint 2>&1 | tee lint.log
+      - run: dev-exec just lint 2>&1 | tee lint.log
         shell: bash
       - uses: actions/upload-artifact@v4
         if: always()
