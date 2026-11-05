@@ -107,6 +107,13 @@
               just
               nodejs
               nixfmt-rfc-style
+              # The native tests start real Python ACP / Harbor peers
+              # (tests/test_acp_launch_prefix.nim, tests/harbor_*.py), and
+              # repro.nim declares `python3 >=3.9` for the same reason. The
+              # shell must provide it: a runner whose ambient PATH has no
+              # python3 (macOS legs, a systemd unit) failed those tests with
+              # `findExe("python3") == ""`.
+              python3
             ];
             shellHook = ''
               ${ownRepoOnly installGitHooks}
