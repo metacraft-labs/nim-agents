@@ -481,11 +481,28 @@ proc toHarborContentBlocks*(items: openArray[ContentBlock]): seq[
     result.add item.toHarborContentBlock()
 
 proc promptText*(items: openArray[ContentBlock]): string =
+  ## Harbor accepts a string prompt. Preserve resource identity as one JSON
+  ## context line without fetching URIs; JSON escaping prevents embedded URI
+  ## or MIME newlines from changing the block framing. Text-only bytes retain
+  ## their existing representation and order.
   for item in items:
-    if item.kind == cbText and item.text.len > 0:
+    var blockText: string
+    case item.kind
+    of cbText:
+      blockText = item.text
+    of cbResource:
+      if item.uri.len == 0:
+        raise newException(ValueError, "resource context requires a nonempty URI")
+      var resource = %*{"uri": item.uri}
+      if item.mimeType.len > 0:
+        resource["mimeType"] = %item.mimeType
+      blockText = "resource: " & $resource
+    else:
+      discard
+    if blockText.len > 0:
       if result.len > 0:
         result.add "\n\n"
-      result.add item.text
+      result.add blockText
 
 proc defaultWorkspaceContext*(cwd = ""): AgentWorkspaceContext =
   AgentWorkspaceContext(repoMode: "none", cwd: cwd)
@@ -539,24 +556,24 @@ proc harborAgentConfig*(config: HarborAcpAgentConfig): AgentConfig =
       args: config.args)
 
 proc harborPromptText*(items: openArray[ContentBlock]): string =
-  var prompt: seq[string]
+  # REST accepts one string. Preserve canonical resource identity and admitted
+  # textual content through the existing ordered text-block representation.
+  # No resource URI is opened and no new resource JSON fields are introduced.
+  var expanded: seq[ContentBlock]
   for item in items:
     case item.kind
     of cbText:
-      if item.text.len > 0: prompt.add item.text
+      expanded.add item
     of cbResource:
-      # REST accepts a string; preserve editor source references and textual
-      # resource content instead of dropping context during ACP conversion.
       if item.data.len > 0 and not (item.mimeType.startsWith("text/") or
           item.mimeType == "application/json"):
         raise newException(HarborError, "Harbor REST prompts cannot embed binary resources")
-      var reference = "Resource: " & item.uri
-      if item.mimeType.len > 0: reference.add " (" & item.mimeType & ")"
-      if item.data.len > 0: reference.add "\n" & item.data
-      prompt.add reference
+      expanded.add item
+      if item.data.len > 0:
+        expanded.add textBlock(item.data)
     else:
       raise newException(HarborError, "Harbor REST prompts currently support text and textual resource references only")
-  prompt.join("\n\n")
+  promptText(expanded)
 
 proc buildHarborTaskRequest*(config: HarborTaskConfig): CreateTaskRequest =
   let repoMode =
