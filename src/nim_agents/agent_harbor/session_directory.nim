@@ -240,6 +240,19 @@ proc reindex(dir: var SessionDirectory) =
   for i, session in dir.sessions:
     dir.index[session.id] = i
 
+proc initSessionDirectory*(sessions: openArray[FleetSession]): SessionDirectory =
+  ## A directory holding `sessions` in the order given (a listing read once,
+  ## whose order a view may already show). A session id listed twice keeps
+  ## its first place and its last entry.
+  result = initSessionDirectory()
+  for session in sessions:
+    let at = result.index.getOrDefault(session.id, -1)
+    if at >= 0:
+      result.sessions[at] = session
+    else:
+      result.sessions.add session
+      result.index[session.id] = result.sessions.high
+
 proc len*(dir: SessionDirectory): int = dir.sessions.len
 
 proc find*(dir: SessionDirectory; id: string): int =
@@ -267,6 +280,22 @@ proc replaceAll*(dir: var SessionDirectory; sessions: openArray[FleetSession]) =
   dir.reindex()
   dir.resyncing = false
   inc dir.revision
+
+proc upsert*(dir: var SessionDirectory; session: FleetSession): bool =
+  ## One session's listing entry (`GET /api/v1/sessions/{id}`, what a
+  ## front-end reads when a `session_created` frame names a session it has
+  ## only as a stub): it replaces the known entry in place, or follows the
+  ## known sessions. True when the session is new; a session without an id is
+  ## not taken.
+  if session.id.len == 0: return false
+  let at = dir.find(session.id)
+  inc dir.revision
+  if at >= 0:
+    dir.sessions[at] = session
+    return false
+  dir.sessions.add session
+  dir.index[session.id] = dir.sessions.high
+  true
 
 proc applyFrame*(dir: var SessionDirectory; frame: LifecycleFrame): bool =
   ## Folds one lifecycle frame in; true when the directory changed. A frame

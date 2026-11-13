@@ -87,3 +87,9 @@ proc digestActivity*(recentOldestFirst: openArray[FleetActivity];
 proc lineText*(line: DigestLine): string =
   ## The line as shown: `Resumed by human ×3`.
   if line.count > 1: line.text & " \xC3\x97" & $line.count else: line.text
+
+proc sessionDigest*(session: FleetSession;
+                    ranking = arInformative): seq[DigestLine] =
+  ## The digest a session row shows: its recent events, with the status
+  ## events left out because the row shows the session's status.
+  digestActivity(session.recent, ranking, currentStatus = session.rawStatus)

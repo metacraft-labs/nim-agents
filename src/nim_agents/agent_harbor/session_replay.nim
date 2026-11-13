@@ -15,6 +15,10 @@
 ## - the update time: the last kept event's.
 ##
 ## Everything else (prompt, agent, workspace) is the session's own.
+##
+## `sessionAt` is `foldEvent` repeated from the session's start, so a front-end
+## that folds a live session's events one at a time (`fleet_fold`) and one
+## that rebuilds the session at a moment read the same session.
 
 import std/[json, strutils]
 import ./fleet_records
@@ -33,6 +37,57 @@ proc questionIndexes*(eventsOldestFirst: openArray[JsonNode]): seq[int] =
   for i, event in eventsOldestFirst:
     if event.isQuestionEvent: result.add i
 
+proc eventTimeMs*(event: JsonNode; startMs: int64): int64 =
+  ## When `event` happened: its timestamp is microseconds since the session
+  ## started, and `startMs` places that start in time.
+  startMs + event{"timestamp"}.getBiggestInt(0).int64 div 1000
+
+proc foldEvent*(session: var FleetSession; event: JsonNode; ordinal: int;
+                startMs: int64; takeStatus = true) =
+  ## One more event of the session's history folded into `session`: the step
+  ## `sessionAt` repeats, and the one a fleet that follows a live session
+  ## takes per event (`fleet_fold`). `ordinal` is the event's 1-based place in
+  ## the history, which names a pending question's request. With
+  ## `takeStatus = false` a `status` event is kept as activity but does not
+  ## move the status, for a caller whose status comes from the lifecycle feed.
+  ##
+  ## The step owns only the waits it can see in the stream: a question. After
+  ## it, a live session waits on a question exactly when this event is the
+  ## agent asking; any other event ends a question wait. A wait the listing
+  ## reports for another reason (a hook such as the end of the agent's turn,
+  ## the server's settle heuristic, a permission or a login) is the
+  ## listing's: an event neither ends nor renames it, except the operator's
+  ## input reaching the session (`session_resumed`, `user_input`), which ends
+  ## every wait. A session replayed from its start (`sessionAt`) only ever
+  ## holds question waits. The session has ended at its last update exactly
+  ## when its status is no longer live.
+  let at = event.eventTimeMs(startMs)
+  session.updatedAtMs = max(session.updatedAtMs, at)
+  if takeStatus and event{"type"}.getStr == "status":
+    session.rawStatus = event{"status"}.getStr
+    session.status = parseFleetStatus(session.rawStatus)
+  var line = activityFromJson(event)
+  line.timestampMs = at
+  session.recent.add line
+  if session.recent.len > ReplayRecentLimit:
+    session.recent = session.recent[^ReplayRecentLimit .. ^1]
+  if not session.status.isActive:
+    session.endedAtMs = session.updatedAtMs
+    session.awaitingInput = false
+    session.awaitingInputSource = ""
+  else:
+    session.endedAtMs = 0
+    let kind = event{"type"}.getStr
+    let questionWait = not session.awaitingInput or
+      "question" in session.awaitingInputSource.toLowerAscii
+    if kind in ["session_resumed", "user_input"] or
+        (questionWait and not event.isQuestionEvent):
+      session.awaitingInput = false
+      session.awaitingInputSource = ""
+    elif questionWait:
+      session.awaitingInput = true
+      session.awaitingInputSource = session.id & ":native-question:" & $ordinal
+
 proc sessionAt*(session: FleetSession; eventsOldestFirst: openArray[JsonNode];
                 count: int; startMs: int64): FleetSession =
   ## `session` after its first `count` events. Event timestamps are
@@ -40,6 +95,7 @@ proc sessionAt*(session: FleetSession; eventsOldestFirst: openArray[JsonNode];
   result = session
   let n = max(0, min(count, eventsOldestFirst.len))
   result.rawStatus = "queued"
+  result.status = fsQueued
   result.awaitingInput = false
   result.awaitingInputSource = ""
   result.endedAtMs = 0
@@ -48,21 +104,7 @@ proc sessionAt*(session: FleetSession; eventsOldestFirst: openArray[JsonNode];
   result.createdAtMs = startMs
   result.updatedAtMs = startMs
   for i in 0 ..< n:
-    let event = eventsOldestFirst[i]
-    let at = startMs + event{"timestamp"}.getBiggestInt(0).int64 div 1000
-    result.updatedAtMs = max(result.updatedAtMs, at)
-    if event{"type"}.getStr == "status":
-      result.rawStatus = event{"status"}.getStr
-  result.status = parseFleetStatus(result.rawStatus)
-  if not result.status.isActive:
-    result.endedAtMs = result.updatedAtMs
-  elif n > 0 and eventsOldestFirst[n - 1].isQuestionEvent:
-    result.awaitingInput = true
-    result.awaitingInputSource = result.id & ":native-question:" & $n
-  for i in max(0, n - ReplayRecentLimit) ..< n:
-    var line = activityFromJson(eventsOldestFirst[i])
-    line.timestampMs = startMs + eventsOldestFirst[i]{"timestamp"}.getBiggestInt(0).int64 div 1000
-    result.recent.add line
+    result.foldEvent(eventsOldestFirst[i], i + 1, startMs)
 
 proc eventsOldestFirst*(history: JsonNode): seq[JsonNode] =
   ## The events of a history answer, oldest first.
