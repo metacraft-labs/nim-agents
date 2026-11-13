@@ -472,3 +472,71 @@ suite "folding a session one event at a time":
     check dir.find("c") == 2
     check not dir.upsert(FleetSession())
     check dir.len == 3
+
+  test "a directory folds one session's events: a question waits, the answer ends it":
+    # The directory's own event step (`applyEvent`), which a tab strip or an
+    # initiatives panel takes events through. Expectations written out.
+    var live = entry("q", "Ask then go on")
+    live.rawStatus = "running"
+    live.status = fsRunning
+    live.startedAtMs = T0
+    live.createdAtMs = T0
+    var dir = initSessionDirectory([live])
+    let revision = dir.revision
+    check dir.applyEvent("q", asked(10), 4)
+    check dir.revision == revision + 1
+    check dir.sessions[0].awaitingInput
+    check dir.sessions[0].awaitingInputSource == "q:native-question:4"
+    check dir.sessions[0].updatedAtMs == T0 + 10_000
+    check dir.sessions[0].recent.len == 1
+    check dir.sessions[0].recent[0].kind == fakQuestion
+    # A status event is activity only: the status stays the feed's.
+    check dir.applyEvent("q", status(11, "failed"), 5)
+    check dir.sessions[0].status == fsRunning
+    check not dir.sessions[0].awaitingInput
+    check dir.applyEvent("q", asked(12), 6)
+    check dir.sessions[0].awaitingInput
+    check dir.applyEvent("q", answered(13), 7)
+    check not dir.sessions[0].awaitingInput
+    check dir.sessions[0].awaitingInputSource == ""
+    check dir.sessions[0].recent.len == 3
+    # A session it lacks and a non-object event change nothing.
+    let before = dir.revision
+    check not dir.applyEvent("nobody", asked(14), 1)
+    check not dir.applyEvent("q", newJString("not an event"), 8)
+    check not dir.applyEvent("q", nil, 8)
+    check not dir.applyEvent("", asked(14), 1)
+    check dir.revision == before
+
+  test "a directory takes every kind of fleet frame":
+    var dir = initSessionDirectory([entry("a", "one")])
+    dir.sessions[0].startedAtMs = T0
+    # A lifecycle frame: a new session arrives as a stub.
+    check dir.applyFleetFrame(lifecycleFrame(LifecycleFrame(event: "lifecycle",
+      kind: "session_created", sessionId: "n", status: "queued", atMs: T0 + 5)))
+    check dir.find("n") == 1
+    check dir.sessions[1].prompt == ""
+    # Its listing entry fills the stub in place.
+    var listed = entry("n", "New work", "plan-9")
+    listed.createdAtMs = T0 + 5
+    listed.startedAtMs = T0 + 5
+    listed.rawStatus = "queued"
+    check dir.applyFleetFrame(sessionFrame(listed))
+    check dir.find("n") == 1
+    check dir.sessions[1].prompt == "New work"
+    check dir.sessions[1].planId == "plan-9"
+    # An event of its stream.
+    check dir.applyFleetFrame(eventFrame("n", asked(3), 2))
+    check dir.sessions[1].awaitingInput
+    check dir.sessions[1].awaitingInputSource == "n:native-question:2"
+    # A listing entry without an id, an event for a session it lacks, a
+    # repeated status: nothing changes.
+    let before = dir.revision
+    check not dir.applyFleetFrame(sessionFrame(FleetSession()))
+    check not dir.applyFleetFrame(eventFrame("gone", asked(3), 1))
+    check not dir.applyFleetFrame(lifecycleFrame(LifecycleFrame(event: "lifecycle",
+      kind: "session_status_changed", sessionId: "n", status: "queued")))
+    check dir.revision == before
+    check dir.applyFleetFrame(lifecycleFrame(LifecycleFrame(event: "lifecycle",
+      kind: "session_removed", sessionId: "a")))
+    check dir.len == 1

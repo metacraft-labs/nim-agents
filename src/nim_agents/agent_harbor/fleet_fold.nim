@@ -234,9 +234,8 @@ proc applyEvent(fold: var FleetFold; sessionId: string; event: JsonNode;
   let session = fold.dir.sessions[at]
   let startMs = if session.startedAtMs > 0: session.startedAtMs
                 else: session.createdAtMs
-  fold.dir.sessions[at].foldEvent(event, place, startMs, takeStatus = false)
+  discard fold.dir.applyEvent(sessionId, event, place)
   fold.folded[sessionId] = place
-  inc fold.dir.revision
   # The appended activity changes what the row's digest says.
   fold.refreshDigest(sessionId)
   fold.recount()
@@ -251,6 +250,22 @@ proc apply*(fold: var FleetFold; frame: FleetFrame): FoldOutcome =
   of ffSession: fold.applyListing(frame.session, frame.atMs)
   of ffEvent: fold.applyEvent(frame.sessionId, frame.event, frame.ordinal,
                               frame.atMs)
+
+proc applyFleetFrame*(dir: var SessionDirectory; frame: FleetFrame): bool =
+  ## One fleet frame folded into a plain `SessionDirectory`, for a sessions
+  ## view that holds a directory rather than a fold (a tab strip, an
+  ## initiatives panel): a lifecycle frame through `applyFrame`, a listing
+  ## entry through `upsert`, an event through `applyEvent` (its `ordinal`
+  ## as given; 0 when the source does not know it). True when the directory
+  ## changed. Unlike `FleetFold.apply` it neither refuses stale frames nor
+  ## keeps digests, counts or a clock: a view that needs those holds a fold.
+  case frame.kind
+  of ffLifecycle: dir.applyFrame(frame.lifecycle)
+  of ffSession:
+    if frame.session.id.len == 0: return false
+    discard dir.upsert(frame.session)
+    true
+  of ffEvent: dir.applyEvent(frame.sessionId, frame.event, frame.ordinal)
 
 proc applyFrame*(fold: var FleetFold; frame: LifecycleFrame): FoldOutcome =
   ## A lifecycle frame from the feed, as the tab strip's reducer takes it.

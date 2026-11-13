@@ -25,11 +25,18 @@
 ## - the label sources, in preference order, a session is titled from when
 ##   its prompt is withheld.
 ##
+## A directory also takes one session's listing entry (`upsert`, what a
+## front-end reads when a `session_created` frame names a session it holds
+## only as a stub) and one event of a session's event stream (`applyEvent`,
+## the per-event step of `session_replay.foldEvent` with the status left to
+## the lifecycle feed), so every sessions view can follow a session that
+## starts waiting on a question or is answered between two listings.
+##
 ## Grouping by initiative is `groupByPlan` here, over the plan association a
 ## session carries (`FleetSession.planId`).
 
-import std/[algorithm, strutils, tables]
-import ./fleet_records
+import std/[algorithm, json, strutils, tables]
+import ./[fleet_records, session_replay]
 
 export fleet_records
 
@@ -295,6 +302,28 @@ proc upsert*(dir: var SessionDirectory; session: FleetSession): bool =
     return false
   dir.sessions.add session
   dir.index[session.id] = dir.sessions.high
+  true
+
+proc applyEvent*(dir: var SessionDirectory; sessionId: string; event: JsonNode;
+                 ordinal: int): bool =
+  ## Folds one event of a session's event stream into the session it names,
+  ## by `session_replay.foldEvent` with `takeStatus = false` (the status is
+  ## the lifecycle feed's; a `status` event is kept as activity only): its
+  ## activity, its update time, and whether it now waits on a question.
+  ## `ordinal` is the event's 1-based place in the session's history, which
+  ## names a pending question's request. True when the session was folded;
+  ## false, and nothing changed, for a session the directory lacks or an
+  ## event that is not a JSON object. The directory does not keep each
+  ## session's place in its history; a caller that must refuse a repeated
+  ## event keeps it (`fleet_fold` does).
+  if sessionId.len == 0 or event.isNil or event.kind != JObject: return false
+  let at = dir.find(sessionId)
+  if at < 0: return false
+  let session = dir.sessions[at]
+  let startMs = if session.startedAtMs > 0: session.startedAtMs
+                else: session.createdAtMs
+  dir.sessions[at].foldEvent(event, ordinal, startMs, takeStatus = false)
+  inc dir.revision
   true
 
 proc applyFrame*(dir: var SessionDirectory; frame: LifecycleFrame): bool =
