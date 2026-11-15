@@ -8,6 +8,12 @@
 ## informative recent event (a failure, a question, a log line the agent
 ## wrote), `arNewest` keeps plain recency, which is what a raw event feed
 ## shows.
+##
+## A question says the most while it waits for its answer. Once the
+## operator's input follows it (`user_input`, or the session resumed), it
+## only records what was asked: it ranks below the answer and what the
+## session did after it (`AnsweredQuestionRank`), so a running row does not
+## keep reading "Asked a … question" after the reader has answered.
 
 import std/strutils
 import ./fleet_records
@@ -26,6 +32,15 @@ type
     count*: int            ## how many collapsed events the line stands for
     newestMs*: int64
     informative*: bool     ## not a routine status, resumption or wait line
+    rank*: int
+      ## Its `informationRank`, or `AnsweredQuestionRank` for a question the
+      ## operator's input followed: the order `arInformative` sorts by.
+
+const
+  AnsweredQuestionRank* = 3
+    ## An answered question: below the operator's answer (5) and the work
+    ## after it, beside a thought; no longer informative (`informative`
+    ## holds from 4).
 
 proc informationRank*(event: FleetActivity): int =
   ## Higher says more. A scrubbed or empty line says nothing.
@@ -47,6 +62,10 @@ proc informationRank*(event: FleetActivity): int =
   of fakStatus: 2
   of fakResumed: 1
 
+proc isOperatorInput(event: FleetActivity): bool =
+  ## The operator's input reaching the session: what answers a question.
+  event.kind in {fakUserInput, fakResumed}
+
 proc digestActivity*(recentOldestFirst: openArray[FleetActivity];
                      ranking = arInformative;
                      currentStatus = ""): seq[DigestLine] =
@@ -56,12 +75,17 @@ proc digestActivity*(recentOldestFirst: openArray[FleetActivity];
   ## two waits reads "Resumed by human ×3"), ordered by `ranking`. Given the
   ## `currentStatus` a row already shows, status events are left out: one
   ## that repeats it says nothing, and an older one contradicts it (a failed
-  ## row reading "Status: running").
+  ## row reading "Status: running"). A question the operator's input
+  ## followed ranks `AnsweredQuestionRank`; a line merged from an answered
+  ## and an unanswered question keeps the newest one's rank.
+  var answered = false   # the operator's input came after this event
   for i in countdown(recentOldestFirst.high, 0):
     let event = recentOldestFirst[i]
-    let rank = informationRank(event)
+    var rank = informationRank(event)
+    if event.isOperatorInput: answered = true
     if rank == 0: continue
     if event.kind == fakStatus and currentStatus.len > 0: continue
+    if event.kind == fakQuestion and answered: rank = AnsweredQuestionRank
     var merged = false
     for line in result.mitems:
       if line.text == event.text and line.level == event.level:
@@ -72,15 +96,12 @@ proc digestActivity*(recentOldestFirst: openArray[FleetActivity];
       result.add DigestLine(text: event.text, level: event.level,
                             kind: event.kind, count: 1,
                             newestMs: event.timestampMs,
-                            informative: rank >= 4)
+                            informative: rank >= 4, rank: rank)
   if ranking == arInformative:
     # A stable insertion sort by rank: equal ranks keep newest-first order.
     for i in 1 ..< result.len:
       var j = i
-      while j > 0 and informationRank(FleetActivity(kind: result[j].kind,
-          text: result[j].text, level: result[j].level)) >
-          informationRank(FleetActivity(kind: result[j - 1].kind,
-          text: result[j - 1].text, level: result[j - 1].level)):
+      while j > 0 and result[j].rank > result[j - 1].rank:
         swap(result[j], result[j - 1])
         dec j
 

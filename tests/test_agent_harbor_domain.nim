@@ -211,6 +211,44 @@ suite "the activity digest":
     check digest.len == 2
     check digest[0].text == "Failed to start: auth"
 
+  test "an answered question gives way to the answer and what followed it":
+    # A running session that asked, was answered and went on: the question
+    # no longer says what the session is doing, so the work after the
+    # answer leads, and the question ranks last (it only records what was
+    # asked). Before the answer, the question leads.
+    let asked = FleetActivity(kind: fakQuestion, text: "Asked a single-choice question",
+                              timestampMs: 1)
+    let answer = FleetActivity(kind: fakUserInput, text: "Instruction sent", timestampMs: 2)
+    let lint = FleetActivity(kind: fakToolUse, text: "Ran just lint", timestampMs: 3)
+    let said = FleetActivity(kind: fakLog, level: "info",
+                             text: "assistant: The config format is TOML.", timestampMs: 3)
+    let waiting = digestActivity([FleetActivity(kind: fakToolUse, text: "Ran just test",
+                                                timestampMs: 0), asked])
+    check waiting[0].text == "Asked a single-choice question"
+    check waiting[0].informative
+    let after = digestActivity([asked, answer, lint], currentStatus = "running")
+    check after.len == 3
+    check after[0].text == "Ran just lint"
+    check after[1].text == "Instruction sent"
+    check after[2].text == "Asked a single-choice question"
+    check not after[2].informative
+    check after[2].rank == AnsweredQuestionRank
+    # Right at the answer, the answer itself leads.
+    check digestActivity([asked, answer])[0].text == "Instruction sent"
+    # An assistant line after the answer leads too.
+    check digestActivity([asked, answer, said])[0].text == said.text
+    # The session resumed answers it as well.
+    let resumed = FleetActivity(kind: fakResumed, text: "Resumed by human", timestampMs: 2)
+    check digestActivity([asked, resumed, lint])[0].text == "Ran just lint"
+    # Asked again after an earlier answer: the newest question waits, and
+    # leads, merged with the answered one of the same words.
+    let again = digestActivity([asked, answer, lint,
+      FleetActivity(kind: fakQuestion, text: "Asked a single-choice question",
+                    timestampMs: 4)])
+    check again[0].text == "Asked a single-choice question"
+    check again[0].count == 2
+    check again[0].informative
+
 suite "replaying a session to a moment":
   let history = parseJson("""{"events":[
     {"type":"status","status":"completed","timestamp":10000000},
