@@ -25,6 +25,9 @@
 ## front-end must keep rendering what it understands.
 
 import std/[json, strutils]
+import ./activity_words
+
+export activity_words
 
 type
   FleetStatus* = enum
@@ -53,23 +56,6 @@ type
     fcQueued = "queued"
     fcFailed = "failed"
     fcEnded = "ended"
-
-  FleetActivityKind* = enum
-    fakQuestion          ## `agent_question`
-    fakAwaitingInput     ## `session_awaiting_input`
-    fakResumed           ## `session_resumed`
-    fakStatus            ## `status`
-    fakLog               ## `log`
-    fakOrchestration     ## `orchestration`
-    fakAntiHalting       ## `anti_halting_resume_confirmed`
-    fakThought           ## `thought`
-    fakToolUse           ## `tool_use` (a tool call started)
-    fakToolResult        ## `tool_result`
-    fakFileEdit          ## `file_edit`
-    fakFileRead          ## `file_read`
-    fakPlan              ## `plan`
-    fakUserInput         ## `user_input` (an instruction the operator sent)
-    fakOther             ## anything else, shown by its wire type
 
   FleetActivity* = object
     ## One session event, reduced to what an activity line shows.
@@ -154,34 +140,21 @@ type
     totalCount*: int
     hasMore*: bool
     events*: seq[FleetActivity]
+      ## Each event's activity line, newest first, as the server lists them.
+    rawEvents*: seq[JsonNode]
+      ## The same events as the server sent them, oldest first: what a view
+      ## that shows more than a line per event (a session's activity
+      ## timeline, with each event's details) folds. Empty when the source
+      ## had only the lines.
 
 # ---------------------------------------------------------------------------
 # Field access
 # ---------------------------------------------------------------------------
 
-proc str(node: JsonNode; key: string): string =
-  ## A string field, or "" when it is absent, null or not a string.
-  if node.isNil or node.kind != JObject: return ""
-  let value = node.getOrDefault(key)
-  if value.isNil or value.kind != JString: "" else: value.getStr
-
-proc num(node: JsonNode; key: string): int64 =
-  if node.isNil or node.kind != JObject: return 0
-  let value = node.getOrDefault(key)
-  if value.isNil: return 0
-  case value.kind
-  of JInt: value.getBiggestInt.int64
-  of JFloat: value.getFloat.int64
-  else: 0
-
-proc flag(node: JsonNode; key: string): bool =
-  if node.isNil or node.kind != JObject: return false
-  let value = node.getOrDefault(key)
-  not value.isNil and value.kind == JBool and value.getBool
-
-proc child(node: JsonNode; key: string): JsonNode =
-  if node.isNil or node.kind != JObject: return nil
-  node.getOrDefault(key)
+template str(node: JsonNode; key: string): string = fieldStr(node, key)
+template num(node: JsonNode; key: string): int64 = fieldNum(node, key)
+template flag(node: JsonNode; key: string): bool = fieldFlag(node, key)
+template child(node: JsonNode; key: string): JsonNode = fieldChild(node, key)
 
 # ---------------------------------------------------------------------------
 # Time
@@ -307,126 +280,12 @@ proc agentLabel*(software, version: string): string =
   if version.len > 0 and version notin ["latest", "unknown"]:
     result.add(" " & version)
 
-proc requestLabel*(request: string): string =
-  ## A readable name for an input request id. The server names a request
-  ## either by its source (`claude-stop-hook`) or as
-  ## `<session id>:<kind>:<sequence>`; the ids and sequence numbers mean
-  ## nothing to a reader, so only the words are kept, dashes as spaces
-  ## (`native question`, `claude stop hook`).
-  var words: seq[string]
-  for part in request.split(':'):
-    let p = part.strip
-    if p.len == 0 or p.allCharsInSet(Digits): continue
-    # A UUID (8-4-4-4-12 hex digits) names a session, not a request kind.
-    if p.len == 36 and p.count('-') == 4 and
-        p.allCharsInSet(HexDigits + {'-'}): continue
-    words.add(p.replace('-', ' ').replace('_', ' '))
-  words.join(" ")
-
 proc activityFromJson*(node: JsonNode): FleetActivity =
-  ## One activity line from a session event. The text is built from the
-  ## event's structured fields only; a question's own prompt and options are
-  ## never echoed, because they may quote private prompt text.
-  let eventType = node.str("type")
-  result = FleetActivity(eventType: eventType,
-                         timestampMs: node.num("timestamp"),
-                         level: node.str("level"))
-  case eventType
-  of "agent_question":
-    result.kind = fakQuestion
-    let kind = node.str("kind").replace('_', '-')
-    result.text = "Asked a " & (if kind.len > 0: kind else: "") &
-      (if kind.len > 0: " question" else: "question")
-  of "session_awaiting_input":
-    result.kind = fakAwaitingInput
-    let request = requestLabel(node.str("request"))
-    result.text = "Waiting for input" &
-      (if request.len > 0: " (" & request & ")" else: "")
-  of "session_resumed":
-    result.kind = fakResumed
-    let by = node.str("deliverer")
-    result.text = "Resumed" & (if by.len > 0: " by " & by else: "")
-  of "status":
-    result.kind = fakStatus
-    result.text = "Status: " & node.str("status")
-  of "log":
-    result.kind = fakLog
-    let message = node.str("message")
-    # Agent Harbor logs an agent's question as `agent question (<agent>):
-    # tool=<tool name>`. The tool name is the agent's implementation detail,
-    # so the line reads as the question it stands for, as `agent_question`
-    # does; the question's own words are not in the line and never echoed.
-    const questionPrefix = "agent question ("
-    let close = message.find(')')
-    if message.startsWith(questionPrefix) and close > questionPrefix.len:
-      result.kind = fakQuestion
-      result.text = "Asked a question (" & message[questionPrefix.len ..< close] & ")"
-    else:
-      result.text = message
-  of "orchestration":
-    result.kind = fakOrchestration
-    result.text = node.str("description")
-    let payload = node.child("payload")
-    let model = payload.str("model")
-    if model.len > 0:
-      result.text.add(": " & model)
-  of "anti_halting_resume_confirmed":
-    result.kind = fakAntiHalting
-    let stall = node.str("stallType").replace('_', ' ')
-    result.text = "Anti-halting resumed a stalled turn" &
-      (if stall.len > 0 and stall != "unknown": " (" & stall & ")" else: "")
-  of "thought":
-    result.kind = fakThought
-    let thought = node.str("thought").strip
-    result.text = "Thinking" &
-      (if thought.len > 0: ": " & thought.splitLines()[0] else: "")
-  of "tool_use":
-    result.kind = fakToolUse
-    let tool = node.str("tool_name")
-    let args = node.child("tool_args")
-    let command = args.str("command")
-    let path = args.str("path")
-    result.text =
-      if command.len > 0: "Ran " & command.splitLines()[0]
-      elif path.len > 0: (if tool.len > 0: tool else: "Tool") & " " & path
-      else: "Called " & (if tool.len > 0: tool else: "a tool")
-  of "tool_result":
-    result.kind = fakToolResult
-    let tool = node.str("tool_name")
-    let status = node.str("status")
-    let failed = status in ["failed", "error"]
-    result.text = (if tool.len > 0: tool else: "Tool") &
-      (if failed: " failed" else: " finished")
-    if failed: result.level = "error"
-  of "file_edit":
-    result.kind = fakFileEdit
-    let added = node.num("lines_added")
-    let removed = node.num("lines_removed")
-    result.text = "Edited " & node.str("file_path") &
-      (if added + removed > 0: " +" & $added & " \xE2\x88\x92" & $removed else: "")
-  of "file_read":
-    result.kind = fakFileRead
-    result.text = "Read " & node.str("file_path")
-  of "plan":
-    result.kind = fakPlan
-    let entries = node.child("entries")
-    var total, active, done = 0
-    if not entries.isNil and entries.kind == JArray:
-      for entry in entries:
-        inc total
-        case entry.str("status")
-        of "in_progress": inc active
-        of "completed": inc done
-        else: discard
-    result.text = (if node.flag("is_update"): "Plan updated: " else: "Plan: ") &
-      $total & " steps, " & $done & " done, " & $active & " in progress"
-  of "user_input":
-    # The instruction itself may quote private prompt text: named, never echoed.
-    result.kind = fakUserInput
-    result.text = "Instruction sent"
-  else:
-    result.kind = fakOther
-    result.text = eventType.replace('_', ' ')
+  ## One activity line from a session event, in the words every view uses
+  ## (`activity_words.activityLine`), stamped with the event's timestamp.
+  let line = activityLine(node)
+  FleetActivity(kind: line.kind, eventType: line.eventType, text: line.text,
+                level: line.level, timestampMs: node.num("timestamp"))
 
 # ---------------------------------------------------------------------------
 # Sessions
@@ -567,6 +426,9 @@ proc sessionEventHistoryFromJson*(sessionId: string;
   if not events.isNil and events.kind == JArray:
     for event in events:
       result.events.add(activityFromJson(event))
+    # The server lists the history newest first; folds take it oldest first.
+    for i in countdown(events.len - 1, 0):
+      result.rawEvents.add(events[i])
 
 proc parseLifecycleSse*(text: string): seq[LifecycleFrame] =
   ## Frames of an SSE capture of the lifecycle feed. Implements the parts of

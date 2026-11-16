@@ -16,6 +16,7 @@ build-native:
     nim c {{paths}} tests/test_nimcache_is_worktree_local.nim
     nim c {{paths}} tests/test_agent_harbor_domain.nim
     nim c {{paths}} tests/test_agent_harbor_fleet_fold.nim
+    nim c {{paths}} tests/test_activity_groups.nim
 
 build-js:
     nim js {{paths}} tests/test_agents.nim
@@ -23,11 +24,13 @@ build-js:
     nim js {{paths}} tests/test_session_load_client.nim
     nim js {{paths}} tests/test_agent_harbor_domain.nim
     nim js {{paths}} tests/test_agent_harbor_fleet_fold.nim
+    nim js {{paths}} tests/test_activity_groups.nim
 
 test: test-native test-js
 
 test-native:
     nim c -r {{paths}} tests/test_activity.nim
+    nim c -r {{paths}} tests/test_activity_groups.nim
     nim c -r {{paths}} tests/test_agent_harbor_domain.nim
     nim c -r {{paths}} tests/test_agent_harbor_fleet_fold.nim
     nim c -r {{paths}} tests/test_acp_launch_prefix.nim
@@ -43,6 +46,7 @@ test-native:
 
 test-js:
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_activity.nim
+    bash tools/nim-js-test-gate.sh {{paths}} tests/test_activity_groups.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_agent_harbor_domain.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_agent_harbor_fleet_fold.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_agents.nim
@@ -62,6 +66,7 @@ lint-nim:
     nim check {{paths}} tests/test_nimcache_is_worktree_local.nim
     nim check {{paths}} tests/test_agent_harbor_domain.nim
     nim check {{paths}} tests/test_agent_harbor_fleet_fold.nim
+    nim check {{paths}} tests/test_activity_groups.nim
 
 lint-nix:
     nixfmt --check flake.nix

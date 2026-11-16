@@ -22,7 +22,10 @@ type
     lastPlainStatus, lastPlainSession: string
     lastPlainTurn: int
 
-proc appendEntry(timeline: var ActivityTimeline; entry: ActivityEntry) =
+proc appendEntry*(timeline: var ActivityTimeline; entry: ActivityEntry) =
+  ## Appends `entry` as a new entry of the current turn, with the next id,
+  ## never merging it into the one before (`reduce` merges streamed chunks;
+  ## a fold that knows each event is a whole line appends it with this).
   var value = entry
   inc timeline.sequence
   inc timeline.revision

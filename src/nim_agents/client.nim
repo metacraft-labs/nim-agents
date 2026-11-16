@@ -648,6 +648,15 @@ proc progressFromRaw(raw: JsonNode): tuple[done: int; total: int] =
     raw{"done"}.getInt(0)))
   result.total = raw{"total"}.getInt(raw{"totalMilestones"}.getInt(0))
 
+proc isPrivateKey*(key: string): bool =
+  ## Whether a field or variable named `key` holds a value that must not cross
+  ## the presentation boundary (a credential, an environment, configuration).
+  ## The one rule for tool arguments and for a command trace's environment.
+  let name = key.toLowerAscii()
+  name.contains("token") or name.contains("password") or
+    name.contains("secret") or name.contains("credential") or
+    name in ["env", "environment", "authorization", "headers", "settings", "config"]
+
 proc presentationArguments(node: JsonNode): JsonNode =
   ## Tool arguments are content, but environment/config/auth values must not cross
   ## the presentation boundary. Preserve structure while removing these fields.
@@ -656,10 +665,7 @@ proc presentationArguments(node: JsonNode): JsonNode =
   of JObject:
     result = newJObject()
     for key, value in node.pairs:
-      let name = key.toLowerAscii()
-      if name.contains("token") or name.contains("password") or
-          name.contains("secret") or name.contains("credential") or
-          name in ["env", "environment", "authorization", "headers", "settings", "config"]:
+      if isPrivateKey(key):
         result[key] = %"[private]"
       else: result[key] = presentationArguments(value)
   of JArray:

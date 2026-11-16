@@ -1,0 +1,752 @@
+## A session's activity as a cardless timeline: one line per event, with runs
+## of similar events collapsed into one group line, and every line expandable
+## to its details. Signal-free and renderer-free; identical on the C and JS
+## targets. Import `nim_agents/activity_groups` explicitly.
+##
+## The fold (`TimelineFold`) wraps the activity reducer (`ActivityTimeline`,
+## `activity.nim`), which merges a tool call's updates into one entry and
+## streamed text into one message, and keeps, beside its entries, what a
+## timeline shows of each: an item (`TimelineItem`: its kind, its one line in
+## the words every view uses, its state, its file, command and counts, its
+## command trace), and the nodes the items are drawn as (`TimelineNode`: an
+## operator's turn, a quiet gap line, a single item, or a group).
+##
+## **The grouping rules**, stated once here and nowhere else:
+##
+## - consecutive items of one groupable kind (`tikRead`, `tikSearch`,
+##   `tikShell`, `tikEdit`) form a group of at least two; one item is not a
+##   group;
+## - thoughts and model requests between two items of the group's kind fold
+##   into the group: they are its items, and the group line never names or
+##   counts them; one after the group's last item of its kind stays outside;
+## - consecutive status or hook lines with identical text and level form one
+##   repeat group, drawn once with `×N`; repeats are never merged across
+##   another line (unlike `activity_digest`, which merges a session's lines
+##   wherever they occur);
+## - anything else ends a group: an operator message (which also starts a
+##   turn), an agent message, a question, a failure the agent stops on
+##   (`tikFailure`), or an item of another kind; so does a gap of at least
+##   `TimelinePolicies.gapMs` (five minutes by default) between two items,
+##   which is drawn as its own quiet line;
+## - a failed shell command inside a group is counted on the group line
+##   (`failed`), not a break;
+## - a group with a running item names it (`runningItem`), so a running
+##   command is never hidden inside a collapsed group.
+##
+## **Identity.** An item's id is its reducer entry's id, which the reducer
+## keeps for a tool call across its updates. A group's id is `group:` and its
+## first item's id, so it keeps its identity as it grows and never shares an
+## id with its own first item; a turn's id is its operator item's id, a gap's
+## `gap:` and the id of the item after it. Ids never change once given, so a
+## reader's expansion and focus survive new events.
+##
+## **Incremental and closed forms.** `apply` keeps the nodes up to date as
+## each event arrives: an append re-derives only the timeline's open tail (the
+## last group or groupable line and any thoughts after it), and an update
+## changes an item in place. `nodesOf` derives the nodes of a whole item list
+## at once; the two agree after every event, which the tests check.
+##
+## **Policies** (choices front-ends make differently):
+##
+## - `ChunkPolicy`: `cpStreamChunks` (ACP streams an agent's text in chunks,
+##   merged into one message per turn, as `ActivityTimeline` does) or
+##   `cpWholeLines` (Agent Harbor sends whole `log` lines and whole
+##   thoughts: each is its own line, an `error`-level log line is a failure,
+##   and the server's `agent question (<agent>): …` line is a question);
+## - `OperatorInputPolicy`: `oiAcknowledge` (a session this front-end
+##   started records the operator's turn when it sends it, so the backend's
+##   `user_input` echo is dropped, as `ActivityTimeline` does) or
+##   `oiObserved` (a session observed from elsewhere: each `user_input`
+##   starts a turn with its content).
+##
+## Status events whose status is a live session state (`queued`, `running`,
+## …) are not lines: the session's status is shown once, beside the timeline,
+## as a fleet row shows it beside its activity digest. Endings (`completed`,
+## `failed`, `cancelled`) are lines.
+##
+## **Command traces.** A shell command may carry a trace of the processes it
+## ran (`CommandTrace`: the process tree with each process's argv, working
+## directory, executable, ids, times, exit status and output, the raw output,
+## and the environment with private values redacted). Agent Harbor serves no
+## such record yet; this module reads the proposed shape from a
+## `command_trace` object on the command's `tool_result`
+## (`commandTraceFromJson`). A command without one has no trace, and a view
+## says so.
+##
+## What crosses into an item: the event's line (`activity_words`, the words
+## every view uses), its structured fields, and the operator's or agent's
+## own text where the server gives it (an item's `body`); a question's prompt
+## and an instruction's content appear in `body`, never in `line`.
+
+import std/[json, options, sets, strutils, tables]
+import nim_agent_harbor
+import ./[client, activity, activity_presentation]
+import ./agent_harbor/activity_words
+
+export options, activity, activity_presentation, activity_words
+
+type
+  TimelineItemKind* = enum
+    tikOperator = "operator"     ## the operator's message (starts a turn)
+    tikAgent = "agent"           ## an agent message
+    tikThought = "thought"
+    tikRead = "read"             ## `file_read`
+    tikSearch = "search"         ## a search tool (grep, glob, find, rg, …)
+    tikShell = "shell"           ## a tool whose arguments carry a `command`
+    tikEdit = "edit"             ## `file_edit`, `diff`
+    tikDelete = "delete"         ## a deleted file
+    tikTool = "tool"             ## any other tool
+    tikPlan = "plan"
+    tikModel = "model"           ## `llm_request`
+    tikHarness = "harness"       ## `sub_agent`, `delegation`, `orchestration`
+    tikQuestion = "question"     ## the agent asks, or waits on a question
+    tikResumed = "resumed"
+    tikStatus = "status"         ## a status or hook line
+    tikFailure = "failure"       ## a failure the agent stops on
+    tikCompleted = "completed"
+    tikCancelled = "cancelled"
+    tikOther = "other"
+
+  TimelineItemState* = enum
+    tisNone = "none"             ## an item with no run state
+    tisRunning = "running"
+    tisOk = "ok"
+    tisFailed = "failed"
+    tisCancelled = "cancelled"
+
+  TracedProcess* = object
+    ## One process of a command's trace.
+    pid*, ppid*: int
+    argv*: seq[string]
+    cwd*, exe*: string
+    startMs*, endMs*: int64
+      ## Milliseconds since the command started; `endMs` is -1 while the
+      ## process still runs.
+    exitCode*: int
+    hasExit*: bool               ## false while running, or when unknown
+    stdout*, stderr*: string
+
+  TraceVariable* = object
+    name*, value*: string        ## a private value reads `[private]`
+
+  CommandTrace* = object
+    ## The processes one command ran (proposed shape; see the module comment).
+    processes*: seq[TracedProcess]
+    rawOutput*: string
+    env*: seq[TraceVariable]
+
+  TimelineItem* = object
+    id*: string
+    kind*: TimelineItemKind
+    turn*: int
+    atMs*: int64
+      ## Milliseconds since the session started (the event's timestamp); -1
+      ## when the event carries none.
+    line*: string                ## the one line, in the words every view uses
+    body*: string
+      ## The operator's or agent's own text where the server gives it: an
+      ## instruction or answer, an agent message, a question's prompt, a
+      ## thought, a completion's summary. "" otherwise.
+    withheld*: bool              ## the server withheld the operator's text
+    level*: string               ## a log line's level
+    state*: TimelineItemState
+    answered*: bool              ## a question the operator's input followed
+    filePath*, command*, toolName*, toolCallId*: string
+    added*, removed*: int
+    exitCode*: int
+    hasExit*: bool
+    options*: seq[string]        ## a question's choices
+    trace*: Option[CommandTrace]
+    entry: int                   ## the reducer entry it shows
+
+  TimelineDetail* = object
+    ## Level 2 of an item: what it carried besides its line.
+    facts*: seq[ActivityFact]    ## `activityPresentation`'s facts
+    arguments*: string           ## a tool's arguments, private fields redacted
+    output*: string              ## a tool's result or output
+    diff*: string                ## an edit's patch
+    body*: string
+    options*: seq[string]
+    hasTrace*: bool
+
+  TimelineGroupKind* = enum
+    tgkRead = "read", tgkSearch = "search", tgkShell = "shell",
+    tgkEdit = "edit", tgkRepeat = "repeat"
+
+  TimelineNodeKind* = enum
+    tnTurn = "turn"              ## an operator message, starting a turn
+    tnGap = "gap"                ## a quiet line for a gap in time
+    tnItem = "item"              ## a single item
+    tnGroup = "group"            ## a run of items drawn as one line
+
+  TimelineNode* = object
+    ## One top-level line. Its items are `first .. last` of the fold's items
+    ## (one item for a turn or a single item; none for a gap).
+    id*: string
+    kind*: TimelineNodeKind
+    first*, last*: int
+    gapMs*: int64                ## a gap's length
+    groupKind*: TimelineGroupKind
+    count*: int                  ## a group's items of its kind
+    failed*, running*: int
+    added*, removed*: int        ## an edit group's line totals
+    runningItem*: string         ## the running item a group line names
+
+  ChunkPolicy* = enum
+    cpStreamChunks = "stream-chunks"
+    cpWholeLines = "whole-lines"
+
+  OperatorInputPolicy* = enum
+    oiAcknowledge = "acknowledge"
+    oiObserved = "observed"
+
+  TimelinePolicies* = object
+    chunks*: ChunkPolicy
+    operatorInput*: OperatorInputPolicy
+    gapMs*: int64                ## the shortest gap drawn as a gap line
+
+  TimelineChange* = object
+    ## What one `apply` did.
+    changed*: bool
+    newItems*: int               ## items added
+    updated*: seq[string]        ## ids of items changed in place
+
+  TimelineFold* = object
+    policies*: TimelinePolicies
+    revision*: int               ## moves on every change
+    timeline: ActivityTimeline
+    items: seq[TimelineItem]
+    nodes: seq[TimelineNode]
+    byEntry: Table[string, int]
+    seen: HashSet[string]
+
+const
+  DefaultGapMs* = 5 * 60_000'i64
+  GroupableKinds* = {tikRead, tikSearch, tikShell, tikEdit}
+  FoldedKinds* = {tikThought, tikModel}
+    ## Kinds that fold into a group between two of its items.
+  LiveStatuses = ["queued", "provisioning", "running", "pausing", "paused",
+                  "resuming", "stopping"]
+  SearchTools = ["grep", "glob", "find", "rg", "ripgrep", "search", "codesearch"]
+  Times = " \xC3\x97"
+  Minus = "\xE2\x88\x92"
+
+proc agentHarborPolicies*(): TimelinePolicies =
+  ## An Agent Harbor session observed from a front-end: whole log lines, the
+  ## operator's input observed.
+  TimelinePolicies(chunks: cpWholeLines, operatorInput: oiObserved,
+                   gapMs: DefaultGapMs)
+
+proc acpPolicies*(): TimelinePolicies =
+  ## A session this front-end runs over ACP: streamed text, the operator's
+  ## turn recorded when sent.
+  TimelinePolicies(chunks: cpStreamChunks, operatorInput: oiAcknowledge,
+                   gapMs: DefaultGapMs)
+
+proc initTimelineFold*(policies = agentHarborPolicies()): TimelineFold =
+  TimelineFold(policies: policies)
+
+# ---------------------------------------------------------------------------
+# Command traces
+# ---------------------------------------------------------------------------
+
+proc commandTraceFromJson*(node: JsonNode): CommandTrace =
+  ## A command trace in the proposed shape: `processes` (each `pid`, `ppid`,
+  ## `argv`, `cwd`, `exe`, `start_ms`, `end_ms`, `exit_code`, `stdout`,
+  ## `stderr`), `raw_output`, and `env` (an object of variables). A variable
+  ## whose name `isPrivateKey` names is redacted, as tool arguments are.
+  if node.isNil or node.kind != JObject: return
+  let processes = node.fieldChild("processes")
+  if not processes.isNil and processes.kind == JArray:
+    for p in processes:
+      var process = TracedProcess(pid: p.fieldNum("pid").int,
+                                  ppid: p.fieldNum("ppid").int,
+                                  cwd: p.fieldStr("cwd"), exe: p.fieldStr("exe"),
+                                  startMs: p.fieldNum("start_ms"),
+                                  stdout: p.fieldStr("stdout"),
+                                  stderr: p.fieldStr("stderr"))
+      let argv = p.fieldChild("argv")
+      if not argv.isNil and argv.kind == JArray:
+        for arg in argv:
+          if arg.kind == JString: process.argv.add arg.getStr
+      let ended = p.fieldChild("end_ms")
+      process.endMs = if ended.isNil or ended.kind != JInt: -1'i64
+                      else: ended.getBiggestInt.int64
+      let exit = p.fieldChild("exit_code")
+      if not exit.isNil and exit.kind == JInt:
+        process.exitCode = exit.getInt
+        process.hasExit = true
+      result.processes.add process
+  result.rawOutput = node.fieldStr("raw_output")
+  let env = node.fieldChild("env")
+  if not env.isNil and env.kind == JObject:
+    for name, value in env.pairs:
+      let text = if value.kind == JString: value.getStr else: $value
+      result.env.add TraceVariable(name: name,
+                                   value: if isPrivateKey(name): "[private]" else: text)
+
+proc failedStage*(trace: CommandTrace): int =
+  ## The index of the first process that exited non-zero, or -1.
+  for i, p in trace.processes:
+    if p.hasExit and p.exitCode != 0: return i
+  -1
+
+# ---------------------------------------------------------------------------
+# Items
+# ---------------------------------------------------------------------------
+
+proc isLiveStatusEvent(event: AgentEvent): bool =
+  ## A `status` event restating a live session state, with nothing else to say.
+  event.sourceType == "status" and event.status in LiveStatuses and
+    event.text.len == 0
+
+proc argumentsCommand(arguments: string): string =
+  ## The `command` of a tool's (redacted) arguments, or "".
+  if arguments.len == 0: return ""
+  try:
+    let node = parseJson(arguments)
+    if node.kind == JObject: return node.fieldStr("command")
+  except JsonParsingError, ValueError:
+    discard
+  ""
+
+proc isQuestionRequest(request: string): bool =
+  ## A `session_awaiting_input` request that names a question (as opposed to
+  ## a hook, such as the agent's stop hook, waiting for the turn to end).
+  "question" in request.toLowerAscii
+
+proc itemKindOf*(event: AgentEvent; policies: TimelinePolicies): TimelineItemKind =
+  ## The timeline kind of one event, from its source type, kind, tool name and
+  ## arguments, never its text -- except the server's own log conventions under
+  ## `cpWholeLines`: a line's level, and its `agent question (…)` form.
+  let raw = event.raw
+  case event.sourceType
+  of "user_input": return tikOperator
+  of "file_read": return tikRead
+  of "file_edit", "diff":
+    return if event.status == "deleted": tikDelete else: tikEdit
+  of "plan": return tikPlan
+  of "llm_request": return tikModel
+  of "sub_agent", "delegation", "orchestration": return tikHarness
+  of "agent_question", "login_required": return tikQuestion
+  of "session_awaiting_input":
+    var request = ""
+    for field in event.presentationFields:
+      if field.name == "request": request = field.value
+    return if isQuestionRequest(request): tikQuestion else: tikStatus
+  of "session_resumed": return tikResumed
+  of "session_ended":
+    for field in event.presentationFields:
+      if field.name == "outcome" and field.value == "failed": return tikFailure
+    return tikStatus
+  of "error": return tikFailure
+  else: discard
+  case event.kind
+  of aekMessageChunk:
+    if policies.chunks == cpWholeLines and event.sourceType == "log":
+      if raw.fieldStr("level") == "error": return tikFailure
+      if questionAgentOf(event.text).len > 0: return tikQuestion
+    tikAgent
+  of aekThoughtChunk: tikThought
+  of aekToolCall, aekToolCallUpdate:
+    let name = event.toolName.toLowerAscii
+    if name in SearchTools: tikSearch
+    elif argumentsCommand(event.toolArguments).len > 0: tikShell
+    else: tikTool
+  of aekFileEdit, aekDiff: tikEdit
+  of aekPlan: tikPlan
+  of aekLlmRequest: tikModel
+  of aekSubAgent: tikHarness
+  of aekError: tikFailure
+  of aekCompleted:
+    if event.sourceType == "status": tikCompleted else: tikStatus
+  of aekCancelled: tikCancelled
+  of aekStatus, aekConnection: tikStatus
+  else: tikOther
+
+proc stateOf(entry: ActivityEntry; kind: TimelineItemKind; exitCode: int;
+             hasExit: bool): TimelineItemState =
+  ## A tool's run state from its entry's status and exit code.
+  if kind notin {tikRead, tikSearch, tikShell, tikTool}: return tisNone
+  if entry.kind == aekToolCall and entry.status in ["started", "pending",
+      "in_progress", "running", ""]:
+    return tisRunning
+  case entry.status.toLowerAscii
+  of "failed", "error": tisFailed
+  of "cancelled", "stopped", "interrupted": tisCancelled
+  of "started", "pending", "in_progress", "running": tisRunning
+  else:
+    if hasExit and exitCode != 0: tisFailed else: tisOk
+
+proc lineOf(event: AgentEvent; entry: ActivityEntry): string =
+  ## The item's line: the shared wording when the event carries its wire form;
+  ## otherwise what the entry says (an ACP event).
+  if not event.raw.isNil and event.raw.kind == JObject:
+    return activityLine(event.raw).text
+  case entry.kind
+  of aekToolCall, aekToolCallUpdate:
+    let command = argumentsCommand(entry.detail)
+    if command.len > 0: "Ran " & command.splitLines()[0]
+    else: "Called " & (if entry.title.len > 0: entry.title else: "a tool")
+  else:
+    let text = entry.text.strip
+    if text.len > 0: text.splitLines()[0] else: $entry.kind
+
+proc newItem(fold: TimelineFold; index: int; event: AgentEvent;
+             kind: TimelineItemKind): TimelineItem =
+  let entry = fold.timeline.entries[index]
+  let raw = event.raw
+  result = TimelineItem(id: entry.id, kind: kind, turn: entry.turn,
+                        atMs: (if raw.isNil or raw.fieldChild("timestamp").isNil: -1'i64
+                               else: raw.fieldNum("timestamp") div 1000),
+                        line: lineOf(event, entry), level: raw.fieldStr("level"),
+                        filePath: event.filePath, toolName: event.toolName,
+                        toolCallId: event.toolCallId,
+                        added: event.linesAdded, removed: event.linesRemoved,
+                        entry: index)
+  if result.filePath.len == 0:
+    for field in event.presentationFields:
+      if field.name == "file_path": result.filePath = field.value
+  case kind
+  of tikOperator:
+    result.body = event.text
+    let withheld = raw.fieldChild("withheld")
+    if not withheld.isNil and withheld.kind == JArray:
+      for name in withheld:
+        if name.kind == JString and name.getStr in ["content", "prompt"]:
+          result.withheld = true
+  of tikAgent, tikFailure:
+    var text = entry.text
+    if text.startsWith("assistant: "): text = text["assistant: ".len .. ^1]
+    result.body = text
+  of tikThought:
+    result.body = entry.text
+  of tikQuestion:
+    result.body = event.question
+    for field in event.presentationFields:
+      if field.name == "option": result.options.add field.value
+  of tikCompleted, tikCancelled:
+    result.body = event.text
+  of tikShell, tikSearch, tikTool:
+    result.command = argumentsCommand(event.toolArguments)
+  else: discard
+  result.state = stateOf(entry, kind, 0, false)
+
+proc refreshItem(fold: var TimelineFold; i: int; event: AgentEvent): bool =
+  ## Brings item `i` up to date with its entry after an update; true when it
+  ## changed.
+  let before = fold.items[i]
+  let entry = fold.timeline.entries[fold.items[i].entry]
+  var item = fold.items[i]
+  if item.kind in {tikAgent, tikFailure}:
+    var text = entry.text
+    if text.startsWith("assistant: "): text = text["assistant: ".len .. ^1]
+    item.body = text
+  elif item.kind == tikThought:
+    item.body = entry.text
+  if event.kind == aekToolCallUpdate and event.toolCallId == item.toolCallId:
+    let raw = event.raw
+    let exit = raw.fieldChild("exit_code")
+    if not exit.isNil and exit.kind == JInt:
+      item.exitCode = exit.getInt
+      item.hasExit = true
+    let trace = raw.fieldChild("command_trace")
+    if not trace.isNil and trace.kind == JObject:
+      item.trace = some(commandTraceFromJson(trace))
+  item.state = stateOf(entry, item.kind, item.exitCode, item.hasExit)
+  fold.items[i] = item
+  item != before
+
+# ---------------------------------------------------------------------------
+# Nodes
+# ---------------------------------------------------------------------------
+
+proc groupKindOf(kind: TimelineItemKind): TimelineGroupKind =
+  case kind
+  of tikRead: tgkRead
+  of tikSearch: tgkSearch
+  of tikShell: tgkShell
+  of tikEdit: tgkEdit
+  else: tgkRepeat
+
+proc gapBefore(items: openArray[TimelineItem]; i: int; gapMs: int64): bool =
+  ## Whether a gap line goes before item `i`.
+  i > 0 and gapMs > 0 and items[i].atMs >= 0 and items[i - 1].atMs >= 0 and
+    items[i].atMs - items[i - 1].atMs >= gapMs
+
+proc summarize(node: var TimelineNode; items: openArray[TimelineItem]) =
+  ## A group's counts, from its items.
+  node.count = 0
+  node.failed = 0
+  node.running = 0
+  node.added = 0
+  node.removed = 0
+  node.runningItem = ""
+  let kind = items[node.first].kind
+  for i in node.first .. node.last:
+    let item = items[i]
+    if node.groupKind != tgkRepeat and item.kind != kind: continue
+    inc node.count
+    if item.state == tisFailed: inc node.failed
+    if item.state == tisRunning:
+      inc node.running
+      node.runningItem = item.id
+    node.added += item.added
+    node.removed += item.removed
+
+proc groupNode(items: openArray[TimelineItem]; first, last: int;
+               kind: TimelineGroupKind): TimelineNode =
+  result = TimelineNode(id: "group:" & items[first].id, kind: tnGroup,
+                        first: first, last: last, groupKind: kind)
+  result.summarize(items)
+
+proc buildNodes(items: openArray[TimelineItem]; start: int;
+                gapMs: int64): seq[TimelineNode] =
+  ## The nodes of `items[start .. ^1]`, given that a node ends just before
+  ## `start` (a gap before `start` included).
+  var i = start
+  while i < items.len:
+    let item = items[i]
+    if items.gapBefore(i, gapMs):
+      result.add TimelineNode(id: "gap:" & item.id, kind: tnGap, first: i,
+                              last: i - 1, gapMs: item.atMs - items[i - 1].atMs)
+    if item.kind == tikOperator:
+      result.add TimelineNode(id: item.id, kind: tnTurn, first: i, last: i)
+      inc i
+      continue
+    if item.kind in GroupableKinds:
+      var lastSame = i
+      var count = 1
+      var j = i + 1
+      while j < items.len and not items.gapBefore(j, gapMs):
+        let k = items[j].kind
+        if k == item.kind:
+          lastSame = j
+          inc count
+        elif k notin FoldedKinds:
+          break
+        inc j
+      if count >= 2:
+        result.add groupNode(items, i, lastSame, groupKindOf(item.kind))
+        i = lastSame + 1
+        continue
+    elif item.kind == tikStatus:
+      var j = i + 1
+      while j < items.len and not items.gapBefore(j, gapMs) and
+          items[j].kind == tikStatus and items[j].line == item.line and
+          items[j].level == item.level:
+        inc j
+      if j - i >= 2:
+        result.add groupNode(items, i, j - 1, tgkRepeat)
+        i = j
+        continue
+    result.add TimelineNode(id: item.id, kind: tnItem, first: i, last: i)
+    inc i
+
+proc nodesOf*(items: openArray[TimelineItem];
+              gapMs = DefaultGapMs): seq[TimelineNode] =
+  ## The closed form: the nodes of a whole item list.
+  buildNodes(items, 0, gapMs)
+
+proc openTail(fold: TimelineFold): int =
+  ## The index of the first node an append may still change: trailing
+  ## thoughts and model requests, and the groupable or status line (single,
+  ## or a group) before them, with a gap line just before that. Every node
+  ## before it is settled.
+  var k = fold.nodes.len
+  while k > 0 and fold.nodes[k - 1].kind == tnItem and
+      fold.items[fold.nodes[k - 1].first].kind in FoldedKinds:
+    dec k
+  if k > 0:
+    let node = fold.nodes[k - 1]
+    if node.kind == tnGroup or (node.kind == tnItem and
+        fold.items[node.first].kind in GroupableKinds + {tikStatus}):
+      dec k
+  if k > 0 and k < fold.nodes.len and fold.nodes[k - 1].kind == tnGap:
+    dec k
+  k
+
+proc rebuildTail(fold: var TimelineFold) =
+  ## Re-derives the open tail's nodes, after an append.
+  let k = fold.openTail
+  let start = if k < fold.nodes.len: fold.nodes[k].first
+              else: fold.items.len - 1
+  fold.nodes.setLen(k)
+  fold.nodes.add buildNodes(fold.items, start, fold.policies.gapMs)
+
+proc resummarize(fold: var TimelineFold; itemIndex: int) =
+  ## Updates the counts of the group holding item `itemIndex`.
+  for node in fold.nodes.mitems:
+    if node.kind == tnGroup and node.first <= itemIndex and itemIndex <= node.last:
+      node.summarize(fold.items)
+
+# ---------------------------------------------------------------------------
+# The fold
+# ---------------------------------------------------------------------------
+
+proc addItem(fold: var TimelineFold; event: AgentEvent;
+             kind: TimelineItemKind; change: var TimelineChange) =
+  ## A new item for the reducer's last entry.
+  let index = fold.timeline.entries.high
+  var item = fold.newItem(index, event, kind)
+  if kind in {tikOperator, tikResumed}:
+    # The operator's input answers every question before it.
+    for i in 0 ..< fold.items.len:
+      if fold.items[i].kind == tikQuestion and not fold.items[i].answered:
+        fold.items[i].answered = true
+        change.updated.add fold.items[i].id
+  fold.byEntry[item.id] = fold.items.len
+  fold.items.add item
+  inc change.newItems
+  fold.rebuildTail()
+
+proc apply*(fold: var TimelineFold; event: AgentEvent): TimelineChange =
+  ## Folds one event. Its `raw` wire form, when present, gives the item's
+  ## line, timestamp, level and command trace.
+  if event.eventId.len > 0:
+    let identity = event.sessionId & ":" & event.eventId
+    if identity in fold.seen: return
+    fold.seen.incl identity
+  if event.isLiveStatusEvent: return
+  let kind = itemKindOf(event, fold.policies)
+  var data = event
+  data.raw = nil
+  if event.sourceType == "user_input":
+    if fold.policies.operatorInput == oiAcknowledge: return
+    fold.timeline.beginTurn(event.text)
+    fold.timeline.entries[^1].data = data
+    fold.addItem(event, tikOperator, result)
+  elif event.kind in {aekMessageChunk, aekThoughtChunk} and
+      fold.policies.chunks == cpWholeLines:
+    # Whole lines: each log line and each thought is its own entry, never
+    # merged into the one before.
+    if event.text.len == 0: return
+    let role = if event.kind == aekMessageChunk: arAssistant else: arActivity
+    fold.timeline.appendEntry(ActivityEntry(role: role, kind: event.kind,
+      data: data, text: event.text, status: "completed"))
+    fold.addItem(event, kind, result)
+  else:
+    let before = fold.timeline.entries.len
+    if not fold.timeline.reduce(event): return
+    if fold.timeline.entries.len > before:
+      fold.addItem(event, kind, result)
+    else:
+      # An update in place: a tool call's result, or streamed text merged
+      # into the entry before.
+      var target = -1
+      if event.kind in {aekToolCall, aekToolCallUpdate} and event.toolCallId.len > 0:
+        for i in countdown(fold.items.high, 0):
+          if fold.items[i].toolCallId == event.toolCallId:
+            target = i
+            break
+      elif fold.items.len > 0:
+        target = fold.items.high
+      if target >= 0:
+        let oldKind = fold.items[target].kind
+        if fold.refreshItem(target, event):
+          result.updated.add fold.items[target].id
+        if fold.items[target].kind != oldKind:
+          fold.nodes = nodesOf(fold.items, fold.policies.gapMs)
+        else:
+          fold.resummarize(target)
+    # A terminal event settles streamed prose of the turn.
+    if event.kind in {aekCompleted, aekCancelled, aekError}:
+      for i in 0 ..< fold.items.len:
+        if fold.items[i].turn == fold.timeline.turn and
+            fold.items[i].kind in {tikAgent, tikThought}:
+          discard fold.refreshItem(i, event)
+  result.changed = result.newItems > 0 or result.updated.len > 0
+  if result.changed: inc fold.revision
+
+proc applyJson*(fold: var TimelineFold; sessionId: string;
+                event: JsonNode): TimelineChange =
+  ## Folds one Agent Harbor event as its stream sends it (`type`,
+  ## `timestamp`, its own fields): decoded by nim-agent-harbor and projected
+  ## by `harborEventToAgentEvent`, which keeps its wire form for the line.
+  if event.isNil or event.kind != JObject: return
+  fold.apply(harborEventToAgentEvent(sessionId, eventFromJson(event)))
+
+# ---------------------------------------------------------------------------
+# Reading the fold
+# ---------------------------------------------------------------------------
+
+proc items*(fold: TimelineFold): seq[TimelineItem] = fold.items
+proc nodes*(fold: TimelineFold): seq[TimelineNode] = fold.nodes
+proc itemCount*(fold: TimelineFold): int = fold.items.len
+proc timeline*(fold: TimelineFold): ActivityTimeline = fold.timeline
+
+proc item*(fold: TimelineFold; index: int): TimelineItem = fold.items[index]
+
+proc findItem*(fold: TimelineFold; id: string): int =
+  ## The index of the item `id`, or -1.
+  fold.byEntry.getOrDefault(id, -1)
+
+proc findNode*(fold: TimelineFold; id: string): int =
+  ## The index of the top-level node `id`, or -1.
+  for i, node in fold.nodes:
+    if node.id == id: return i
+  -1
+
+proc itemsOf*(fold: TimelineFold; node: TimelineNode): seq[TimelineItem] =
+  ## A node's items (none for a gap).
+  for i in node.first .. node.last: result.add fold.items[i]
+
+proc summary*(node: TimelineNode): string =
+  ## A group line's words: `Read 4 files`, `Searched 3 times`, `Ran 2 shell
+  ## commands`, `Edited 3 files`; a repeat group says nothing here (its line
+  ## is its items' line, `repeatText`).
+  let n = node.count
+  case node.groupKind
+  of tgkRead: "Read " & $n & (if n == 1: " file" else: " files")
+  of tgkSearch: "Searched " & $n & (if n == 1: " time" else: " times")
+  of tgkShell: "Ran " & $n & (if n == 1: " shell command" else: " shell commands")
+  of tgkEdit: "Edited " & $n & (if n == 1: " file" else: " files")
+  of tgkRepeat: ""
+
+proc failedText*(node: TimelineNode): string =
+  ## `(1 failed)`, or "".
+  if node.failed > 0: "(" & $node.failed & " failed)" else: ""
+
+proc totalsText*(node: TimelineNode): string =
+  ## An edit group's `+40 −12`, or "".
+  if node.groupKind == tgkEdit and node.added + node.removed > 0:
+    "+" & $node.added & " " & Minus & $node.removed
+  else: ""
+
+proc nodeText*(fold: TimelineFold; node: TimelineNode): string =
+  ## A node's whole line as one string: a group's summary with its totals and
+  ## failures, a repeat's line with `×N`, an item's line, a gap's length.
+  case node.kind
+  of tnGap:
+    let minutes = node.gapMs div 60_000
+    if minutes >= 60: $(minutes div 60) & " h later" else: $minutes & " min later"
+  of tnTurn, tnItem: fold.items[node.first].line
+  of tnGroup:
+    if node.groupKind == tgkRepeat:
+      fold.items[node.first].line & Times & $node.count
+    else:
+      var parts = @[node.summary]
+      if node.totalsText.len > 0: parts.add node.totalsText
+      if node.failedText.len > 0: parts.add node.failedText
+      parts.join(" ")
+
+proc detailOf*(fold: TimelineFold; id: string): TimelineDetail =
+  ## Level 2 of the item `id`: its facts, redacted arguments, output, diff and
+  ## body. An unknown id has no detail.
+  let i = fold.findItem(id)
+  if i < 0: return
+  let item = fold.items[i]
+  let entry = fold.timeline.entries[item.entry]
+  result.facts = activityPresentation(entry).facts
+  result.body = item.body
+  result.options = item.options
+  result.hasTrace = item.trace.isSome
+  case entry.kind
+  of aekToolCall, aekToolCallUpdate:
+    result.arguments = entry.detail
+    result.output = entry.text
+  of aekDiff:
+    result.diff = entry.data.diff
+  else: discard
+  if item.kind == tikEdit and result.diff.len == 0:
+    result.diff = entry.data.diff
