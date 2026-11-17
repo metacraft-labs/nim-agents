@@ -62,7 +62,19 @@
 ## Status events whose status is a live session state (`queued`, `running`,
 ## …) are not lines: the session's status is shown once, beside the timeline,
 ## as a fleet row shows it beside its activity digest. Endings (`completed`,
-## `failed`, `cancelled`) are lines.
+## `failed`, `cancelled`) are lines. A session's failed ending right after
+## the failure it repeats is marked (`repeatsFault`), so a view draws one
+## fault in the error role once; the rule reads item kinds and wire types,
+## never a line's text.
+##
+## **Waits.** A wait (`session_awaiting_input`) is a question when the server
+## says the agent is blocked on one, and a status line when its turn ended
+## (an agent's stop hook, which repeats and forms `×N`). The server says so in
+## a second event, `session_awaiting_input_kind` (`kind`: `question_pending`,
+## `turn_ended` or `unknown`), sent right after the wait with the same
+## `request`; it refines that wait in place and is no line of its own. Until
+## it arrives, or when it says `unknown`, the request decides: a request that
+## names a question (`<session>:native-question:<n>`) is a question.
 ##
 ## **Command traces.** A shell command may carry a trace of the processes it
 ## ran (`CommandTrace`: the process tree with each process's argv, working
@@ -143,6 +155,9 @@ type
       ## Milliseconds since the session started (the event's timestamp); -1
       ## when the event carries none.
     line*: string                ## the one line, in the words every view uses
+    sourceType*: string
+      ## The wire type of the event it shows (`status`, `session_ended`, …):
+      ## what a rule reads instead of the line's text.
     body*: string
       ## The operator's or agent's own text where the server gives it: an
       ## instruction or answer, an agent message, a question's prompt, a
@@ -156,6 +171,10 @@ type
     exitCode*: int
     hasExit*: bool
     options*: seq[string]        ## a question's choices
+    request*: string             ## a wait's request (`session_awaiting_input`)
+    waitKind*: string
+      ## A wait's kind as the server refined it (`turn_ended`,
+      ## `question_pending`, `unknown`); "" until a kind event names it.
     trace*: Option[CommandTrace]
     entry: int                   ## the reducer entry it shows
 
@@ -228,6 +247,11 @@ const
   LiveStatuses = ["queued", "provisioning", "running", "pausing", "paused",
                   "resuming", "stopping"]
   SearchTools = ["grep", "glob", "find", "rg", "ripgrep", "search", "codesearch"]
+  SessionEndings* = ["status", "session_ended"]
+    ## The wire types of a session's own ending (a `status` event naming an
+    ## end, `session_ended`), as opposed to the agent's failure it may repeat.
+  AwaitingKindEvent* = "session_awaiting_input_kind"
+    ## The event that refines a wait (`session_awaiting_input`) with its kind.
   Times = " \xC3\x97"
   Minus = "\xE2\x88\x92"
 
@@ -311,9 +335,21 @@ proc argumentsCommand(arguments: string): string =
   ""
 
 proc isQuestionRequest(request: string): bool =
-  ## A `session_awaiting_input` request that names a question (as opposed to
-  ## a hook, such as the agent's stop hook, waiting for the turn to end).
+  ## The fallback for a wait no kind event has refined (a server that sends
+  ## none, or a kind of `unknown`): a `session_awaiting_input` request that
+  ## names a question (`<session>:native-question:<n>`), as opposed to a hook,
+  ## such as the agent's stop hook (`claude-stop-hook`), waiting for the turn
+  ## to end. The request id is the only thing the wait event itself carries.
   "question" in request.toLowerAscii
+
+proc waitKindOf(kind, request: string): TimelineItemKind =
+  ## A wait's item kind: from its kind when the server named one
+  ## (`question_pending` a question, `turn_ended` a status line), otherwise
+  ## from its request (`isQuestionRequest`).
+  case kind
+  of "question_pending": tikQuestion
+  of "turn_ended": tikStatus
+  else: (if isQuestionRequest(request): tikQuestion else: tikStatus)
 
 proc itemKindOf*(event: AgentEvent; policies: TimelinePolicies): TimelineItemKind =
   ## The timeline kind of one event, from its source type, kind, tool name and
@@ -333,7 +369,7 @@ proc itemKindOf*(event: AgentEvent; policies: TimelinePolicies): TimelineItemKin
     var request = ""
     for field in event.presentationFields:
       if field.name == "request": request = field.value
-    return if isQuestionRequest(request): tikQuestion else: tikStatus
+    return waitKindOf("", request)
   of "session_resumed": return tikResumed
   of "session_ended":
     for field in event.presentationFields:
@@ -397,6 +433,7 @@ proc newItem(fold: TimelineFold; index: int; event: AgentEvent;
   let entry = fold.timeline.entries[index]
   let raw = event.raw
   result = TimelineItem(id: entry.id, kind: kind, turn: entry.turn,
+                        sourceType: event.sourceType,
                         atMs: (if raw.isNil or raw.fieldChild("timestamp").isNil: -1'i64
                                else: raw.fieldNum("timestamp") div 1000),
                         line: lineOf(event, entry), level: raw.fieldStr("level"),
@@ -407,6 +444,8 @@ proc newItem(fold: TimelineFold; index: int; event: AgentEvent;
   if result.filePath.len == 0:
     for field in event.presentationFields:
       if field.name == "file_path": result.filePath = field.value
+  if event.sourceType == "session_awaiting_input":
+    result.request = raw.fieldStr("request")
   case kind
   of tikOperator:
     result.body = event.text
@@ -600,6 +639,35 @@ proc addItem(fold: var TimelineFold; event: AgentEvent;
   inc change.newItems
   fold.rebuildTail()
 
+proc refineWait(fold: var TimelineFold; event: AgentEvent;
+                change: var TimelineChange) =
+  ## A wait's kind (`session_awaiting_input_kind`, which the server sends
+  ## right after the wait it refines, with the same request) is no line of
+  ## its own: it settles whether the newest wait with that request, not yet
+  ## refined, is a question or a status line.
+  let request = event.raw.fieldStr("request")
+  let kind = event.raw.fieldStr("kind")
+  for i in countdown(fold.items.high, 0):
+    if fold.items[i].sourceType != "session_awaiting_input" or
+        fold.items[i].request != request or fold.items[i].waitKind.len > 0:
+      continue
+    let before = fold.items[i]
+    var item = before
+    item.waitKind = if kind.len > 0: kind else: "unknown"
+    item.kind = waitKindOf(item.waitKind, request)
+    if item.kind == tikQuestion and before.kind != tikQuestion:
+      # A question the operator already answered stays answered.
+      for j in i + 1 .. fold.items.high:
+        if fold.items[j].kind in {tikOperator, tikResumed}:
+          item.answered = true
+          break
+    fold.items[i] = item
+    if item != before:
+      change.updated.add item.id
+      if item.kind != before.kind:
+        fold.nodes = nodesOf(fold.items, fold.policies.gapMs)
+    return
+
 proc apply*(fold: var TimelineFold; event: AgentEvent): TimelineChange =
   ## Folds one event. Its `raw` wire form, when present, gives the item's
   ## line, timestamp, level and command trace.
@@ -608,6 +676,11 @@ proc apply*(fold: var TimelineFold; event: AgentEvent): TimelineChange =
     if identity in fold.seen: return
     fold.seen.incl identity
   if event.isLiveStatusEvent: return
+  if event.sourceType == AwaitingKindEvent:
+    fold.refineWait(event, result)
+    result.changed = result.updated.len > 0
+    if result.changed: inc fold.revision
+    return
   let kind = itemKindOf(event, fold.policies)
   var data = event
   data.raw = nil
@@ -686,6 +759,21 @@ proc findNode*(fold: TimelineFold; id: string): int =
   for i, node in fold.nodes:
     if node.id == id: return i
   -1
+
+proc isSessionEnding*(item: TimelineItem): bool =
+  ## The session's own ending (a `status` or `session_ended` event), as
+  ## opposed to an agent's failure or any other line.
+  item.sourceType in SessionEndings
+
+proc repeatsFault*(fold: TimelineFold; index: int): bool =
+  ## Whether item `index` is a session's failed ending that repeats the
+  ## failure right before it (one fault is red once): a `tikFailure` that is
+  ## a session ending, whose item before is a `tikFailure` (the agent's own,
+  ## or another ending). Read from the items, so a filter over the lines
+  ## does not change it.
+  index > 0 and index < fold.items.len and
+    fold.items[index].kind == tikFailure and fold.items[index].isSessionEnding and
+    fold.items[index - 1].kind == tikFailure
 
 proc itemsOf*(fold: TimelineFold; node: TimelineNode): seq[TimelineItem] =
   ## A node's items (none for a gap).

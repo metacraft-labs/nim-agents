@@ -69,6 +69,16 @@ proc waits(s: int; request: string): JsonNode =
 proc status(s: int; value: string; message = ""): JsonNode =
   at(s, %*{"type": "status", "status": value, "message": message})
 
+proc waitKind(s: int; request, kind: string): JsonNode =
+  ## The server's refinement of the wait before it (`session_awaiting_input_kind`).
+  at(s, %*{"type": "session_awaiting_input_kind", "request": request, "kind": kind})
+
+proc ends(s: int; outcome: string): JsonNode =
+  at(s, %*{"type": "session_ended", "outcome": outcome})
+
+proc closedFormHolds(fold: TimelineFold): bool =
+  nodesOf(fold.items, fold.policies.gapMs) == fold.nodes
+
 proc foldOf(events: openArray[JsonNode];
             policies = agentHarborPolicies()): TimelineFold =
   result = initTimelineFold(policies)
@@ -164,6 +174,76 @@ suite "items: kinds and one line each":
                        waits(2, Session & ":native-question:7")])
     check fold.kindsOf == @[tikStatus, tikQuestion]
     check fold.items[0].line == "Waiting for input (claude stop hook)"
+
+  test "a wait's kind, when the server names it, decides; it is no line":
+    let stop = "claude-stop-hook"
+    let native = Session & ":native-question:7"
+    # A stop-hook wait the server says is blocked on a question is one, and a
+    # question-named wait whose turn ended is a status line.
+    var fold = foldOf([waits(1, stop)])
+    check fold.kindsOf == @[tikStatus]
+    let change = fold.applyJson(Session, waitKind(1, stop, "question_pending"))
+    check change.changed
+    check change.newItems == 0
+    check change.updated == @[fold.items[0].id]
+    check fold.kindsOf == @[tikQuestion]
+    check fold.items[0].waitKind == "question_pending"
+    check fold.closedFormHolds
+    check foldOf([waits(1, native), waitKind(1, native, "turn_ended")]).kindsOf ==
+      @[tikStatus]
+    # `unknown`, or no kind at all, leaves the request to decide.
+    check foldOf([waits(1, native), waitKind(1, native, "unknown")]).kindsOf ==
+      @[tikQuestion]
+    check foldOf([waits(1, stop), waitKind(1, stop, "unknown")]).kindsOf == @[tikStatus]
+    # The kind refines the newest wait with its request, once: the stop hook's
+    # turn-ended waits still form one repeat line.
+    let repeats = foldOf([waits(1, stop), waitKind(1, stop, "turn_ended"),
+                          waits(2, stop), waitKind(2, stop, "turn_ended"),
+                          waits(3, stop), waitKind(3, stop, "turn_ended")])
+    check repeats.shape == @["group Waiting for input (claude stop hook)" & Times & "3 [3]"]
+    check repeats.items.mapIt(it.waitKind) == @["turn_ended", "turn_ended", "turn_ended"]
+    # A wait refined to a question breaks the repeat it would have joined.
+    let broken = foldOf([waits(1, stop), waits(2, stop), waitKind(2, stop, "question_pending"),
+                         waits(3, stop)])
+    check broken.kindsOf == @[tikStatus, tikQuestion, tikStatus]
+    check broken.nodes.mapIt(it.kind) == @[tnItem, tnItem, tnItem]
+    check broken.closedFormHolds
+    # A kind with no wait to refine changes nothing.
+    var lone = foldOf([read(1, "a.py")])
+    check not lone.applyJson(Session, waitKind(2, stop, "question_pending")).changed
+    check lone.kindsOf == @[tikRead]
+    # A wait the operator already answered stays answered as a question.
+    let late = foldOf([waits(1, native), instructs(2, "Go on."),
+                       waitKind(3, native, "question_pending")])
+    check late.items[0].kind == tikQuestion
+    check late.items[0].answered
+
+  test "a session's failed ending right after a failure repeats it":
+    # The agent's failure, then the session's failed status: one fault.
+    let fold = foldOf([says(1, "the upgrade breaks the tests", "error"),
+                       status(2, "failed", "The agent stopped.")])
+    check fold.kindsOf == @[tikFailure, tikFailure]
+    check not fold.repeatsFault(0)
+    check fold.repeatsFault(1)
+    # A chain of endings repeats the one fault.
+    let chain = foldOf([at(1, %*{"type": "error", "message": "out of memory"}),
+                        ends(2, "failed"), status(3, "failed")])
+    check chain.kindsOf == @[tikFailure, tikFailure, tikFailure]
+    check (0 ..< 3).toSeq.mapIt(chain.repeatsFault(it)) == @[false, true, true]
+    # An ending that is itself the fault is repeated by the ending after it.
+    let endings = foldOf([ends(1, "failed"), status(2, "failed")])
+    check (0 ..< 2).toSeq.mapIt(endings.repeatsFault(it)) == @[false, true]
+    # A failed ending with no failure right before it is the fault itself.
+    let alone = foldOf([says(1, "the upgrade breaks the tests", "error"),
+                        read(2, "a.py"), status(3, "failed")])
+    check not alone.repeatsFault(2)
+    check not foldOf([status(1, "failed")]).repeatsFault(0)
+    # Two failures of the agent's own are two faults.
+    let two = foldOf([says(1, "first", "error"), says(2, "second", "error")])
+    check not two.repeatsFault(1)
+    # A completed ending repeats nothing.
+    check not foldOf([says(1, "x", "error"), status(2, "completed")]).repeatsFault(1)
+    check fold.items.mapIt(it.sourceType) == @["log", "status"]
 
   test "the operator's input answers the questions before it":
     var fold = foldOf([asks(1, "Which jitter?"), says(2, "assistant: waiting")])
