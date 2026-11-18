@@ -111,7 +111,11 @@ proc isMilestoneId*(id: string): bool =
     inc i
   true
 
-proc parseMilestoneHeading(line: string): tuple[ok: bool, id, title: string] =
+proc parseMilestoneHeading*(line: string): tuple[ok: bool, id, title: string] =
+  ## A milestone heading, `** <id>: <title>` with an id `isMilestoneId`
+  ## accepts; `ok` is false for any other line. The one rule for what a
+  ## milestone heading is: the progress counts here and the review record
+  ## (`review_record.nim`) both call it.
   if not line.startsWith("** "): return
   let rest = line[3 .. ^1].strip
   let colon = rest.find(':')

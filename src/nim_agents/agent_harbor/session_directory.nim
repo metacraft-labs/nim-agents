@@ -177,6 +177,19 @@ proc waitDescription*(session: FleetSession): string =
   of iwPaused: "the session is paused"
   of iwOther: "waiting for: " & session.awaitingInputSource
 
+proc waitKindWord*(session: FleetSession): string =
+  ## The inbox's words for what the session asks of the operator
+  ## (`activity_words.waitWords`: `needs your answer`, `waiting for your next
+  ## instruction`, …), so a tab's tooltip and the session's inbox row say the
+  ## same words; "" when the session does not wait or waits for a reason the
+  ## inbox has no kind for (estimated, paused, unknown).
+  case session.inputWaitKind
+  of iwQuestion: waitWords(wwQuestion)
+  of iwPermission: waitWords(wwPermission)
+  of iwLogin: waitWords(wwLogin)
+  of iwIdlePrompt: waitWords(wwEndedTurn)
+  of iwNone, iwEstimated, iwPaused, iwOther: ""
+
 # ---------------------------------------------------------------------------
 # Labels
 # ---------------------------------------------------------------------------

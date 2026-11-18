@@ -225,3 +225,31 @@ proc activityLine*(node: JsonNode): ActivityLine =
   else:
     result.kind = fakOther
     result.text = eventType.replace('_', ' ')
+
+# ---------------------------------------------------------------------------
+# What a waiting session asks of the operator
+# ---------------------------------------------------------------------------
+
+type
+  WaitWordKind* = enum
+    ## Why a session waits for the operator, as every view of the wait names
+    ## it: an inbox row (`inbox.kindWord`) and a session tab's tooltip
+    ## (`session_directory.waitKindWord`) say the same words for the same
+    ## wait (INV-D-14). A timeline's question line (`activityLine`, `Asked a
+    ## … question`) names the event that started the wait, not the wait, and
+    ## keeps its own words.
+    wwQuestion       ## a blocked question
+    wwEndedTurn      ## the turn ended; the agent waits for the next instruction
+    wwPermission     ## a permission gate
+    wwLogin          ## a login request
+    wwFeedback       ## an async feedback request (the agent keeps working)
+
+proc waitWords*(kind: WaitWordKind): string =
+  ## The one wording of a wait, completing "<session> …" (`needs your
+  ## answer`). The single definition: every view takes it from here.
+  case kind
+  of wwQuestion: "needs your answer"
+  of wwEndedTurn: "waiting for your next instruction"
+  of wwPermission: "asks for permission"
+  of wwLogin: "asks you to sign in"
+  of wwFeedback: "asks for feedback"

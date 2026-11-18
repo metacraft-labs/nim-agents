@@ -17,6 +17,9 @@ build-native:
     nim c {{paths}} tests/test_agent_harbor_domain.nim
     nim c {{paths}} tests/test_agent_harbor_fleet_fold.nim
     nim c {{paths}} tests/test_activity_groups.nim
+    nim c {{paths}} tests/test_review_record.nim
+    nim c {{paths}} tests/test_change_diff.nim
+    nim c {{paths}} tests/test_inbox.nim
 
 build-js:
     nim js {{paths}} tests/test_agents.nim
@@ -25,6 +28,9 @@ build-js:
     nim js {{paths}} tests/test_agent_harbor_domain.nim
     nim js {{paths}} tests/test_agent_harbor_fleet_fold.nim
     nim js {{paths}} tests/test_activity_groups.nim
+    nim js {{paths}} tests/test_review_record.nim
+    nim js {{paths}} tests/test_change_diff.nim
+    nim js {{paths}} tests/test_inbox.nim
 
 test: test-native test-js
 
@@ -33,6 +39,9 @@ test-native:
     nim c -r {{paths}} tests/test_activity_groups.nim
     nim c -r {{paths}} tests/test_agent_harbor_domain.nim
     nim c -r {{paths}} tests/test_agent_harbor_fleet_fold.nim
+    nim c -r {{paths}} tests/test_review_record.nim
+    nim c -r {{paths}} tests/test_change_diff.nim
+    nim c -r {{paths}} tests/test_inbox.nim
     nim c -r {{paths}} tests/test_acp_launch_prefix.nim
     nim c -r {{paths}} tests/test_harbor_lifecycle_threads.nim
     nim c -r {{paths}} tests/test_harbor_rest_native.nim
@@ -49,6 +58,9 @@ test-js:
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_activity_groups.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_agent_harbor_domain.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_agent_harbor_fleet_fold.nim
+    bash tools/nim-js-test-gate.sh {{paths}} tests/test_review_record.nim
+    bash tools/nim-js-test-gate.sh {{paths}} tests/test_change_diff.nim
+    bash tools/nim-js-test-gate.sh {{paths}} tests/test_inbox.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_agents.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_consumers.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_session_load_client.nim
@@ -67,6 +79,9 @@ lint-nim:
     nim check {{paths}} tests/test_agent_harbor_domain.nim
     nim check {{paths}} tests/test_agent_harbor_fleet_fold.nim
     nim check {{paths}} tests/test_activity_groups.nim
+    nim check {{paths}} tests/test_review_record.nim
+    nim check {{paths}} tests/test_change_diff.nim
+    nim check {{paths}} tests/test_inbox.nim
 
 lint-nix:
     nixfmt --check flake.nix
