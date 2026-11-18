@@ -20,6 +20,7 @@ build-native:
     nim c {{paths}} tests/test_review_record.nim
     nim c {{paths}} tests/test_change_diff.nim
     nim c {{paths}} tests/test_inbox.nim
+    nim c {{paths}} tests/test_instruction_composer.nim
 
 build-js:
     nim js {{paths}} tests/test_agents.nim
@@ -31,12 +32,14 @@ build-js:
     nim js {{paths}} tests/test_review_record.nim
     nim js {{paths}} tests/test_change_diff.nim
     nim js {{paths}} tests/test_inbox.nim
+    nim js {{paths}} tests/test_instruction_composer.nim
 
 test: test-native test-js
 
 test-native:
     nim c -r {{paths}} tests/test_activity.nim
     nim c -r {{paths}} tests/test_activity_groups.nim
+    nim c -r {{paths}} tests/test_instruction_composer.nim
     nim c -r {{paths}} tests/test_agent_harbor_domain.nim
     nim c -r {{paths}} tests/test_agent_harbor_fleet_fold.nim
     nim c -r {{paths}} tests/test_review_record.nim
@@ -56,6 +59,7 @@ test-native:
 test-js:
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_activity.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_activity_groups.nim
+    bash tools/nim-js-test-gate.sh {{paths}} tests/test_instruction_composer.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_agent_harbor_domain.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_agent_harbor_fleet_fold.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_review_record.nim
@@ -82,6 +86,7 @@ lint-nim:
     nim check {{paths}} tests/test_review_record.nim
     nim check {{paths}} tests/test_change_diff.nim
     nim check {{paths}} tests/test_inbox.nim
+    nim check {{paths}} tests/test_instruction_composer.nim
 
 lint-nix:
     nixfmt --check flake.nix

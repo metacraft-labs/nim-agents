@@ -1,7 +1,9 @@
 ## What the operator asks an Agent Harbor server to do from the Inbox and
 ## the Changes panel -- answer, decide, approve, revert, set a priority --
-## as typed values with no transport (INV-D-09, INV-D-15, INV-P3-12 …
-## INV-P3-19).
+## and from the omnibox composer -- instruct a session or a manager, launch a
+## task, start an initiative, stop a session's turn -- as typed values with
+## no transport (INV-D-09, INV-D-15, INV-P3-12 … INV-P3-19; INV-C-20 …
+## INV-C-23, INV-P2-30, -32, -34, -42, -61).
 ##
 ## A view never talks to a server: it builds an `OperatorAction` and hands
 ## it to its data source, which sends it, answers it from a script, or says
@@ -37,6 +39,10 @@ type
     oaApplyStaged = "apply-staged"
     oaDiscardStaged = "discard-staged"
     oaMarkViewing = "mark-viewing"             ## the viewing heartbeat
+    oaInstructManager = "instruct-manager"     ## an instruction to a manager agent
+    oaLaunchTask = "launch-task"               ## new work, with its launch options
+    oaStartInitiative = "start-initiative"     ## a new initiative and its plan
+    oaStopSession = "stop-session"             ## stop the turn a session runs
 
   ApprovalScope* = enum
     ## What a sudo or network approval asks for; each has its own route.
@@ -63,6 +69,9 @@ type
     milestoneId*: string
     scope*: ApprovalScope  ## oaDecideApproval: which approval it decides
     password*: Secret
+    params*: seq[(string, string)]
+      ## A launch's or an initiative's options, by name, in the form's order
+      ## (`repository`, `branch`, `agents`, `cron`, `plan`, …).
 
 proc secret*(value: string): Secret = Secret(value: value)
 proc reveal*(s: Secret): string = s.value
@@ -153,6 +162,30 @@ proc markViewing*(sessionId: string; server = ""): OperatorAction =
   ## every `ViewingHeartbeatMs` while the item is visible.
   OperatorAction(kind: oaMarkViewing, sessionId: sessionId, server: server)
 
+proc instructManager*(managerSessionId, text: string; taskId = "";
+                      server = ""): OperatorAction =
+  ## An instruction to a manager agent (the manager of the initiative
+  ## `taskId`, or Agent Harbor's).
+  OperatorAction(kind: oaInstructManager, sessionId: managerSessionId, text: text,
+                 taskId: taskId, server: server)
+
+proc launchTask*(text: string; params: seq[(string, string)];
+                 managerSessionId = ""; server = ""): OperatorAction =
+  ## New work: the instruction and its launch options, sent through the
+  ## manager agent that routes it.
+  OperatorAction(kind: oaLaunchTask, sessionId: managerSessionId, text: text,
+                 params: params, server: server)
+
+proc startInitiative*(goal: string; params: seq[(string, string)];
+                      managerSessionId = ""; server = ""): OperatorAction =
+  ## A new initiative: its goal and its plan's options.
+  OperatorAction(kind: oaStartInitiative, sessionId: managerSessionId, text: goal,
+                 params: params, server: server)
+
+proc stopSession*(sessionId: string; server = ""): OperatorAction =
+  ## Stops the turn the session is running.
+  OperatorAction(kind: oaStopSession, sessionId: sessionId, server: server)
+
 const ViewingHeartbeatMs* = 20_000
   ## How often a visible item's page repeats `markViewing`.
 
@@ -167,7 +200,9 @@ proc routeOf*(action: OperatorAction): tuple[verb, path: string] =
   case action.kind
   of oaAnswerQuestion, oaDecidePermission, oaSendDraft:
     ("POST", "/api/v1/sessions/" & s & "/feedback/" & action.requestId & "/respond")
-  of oaSendInstruction: ("POST", "/api/v1/sessions/" & s & "/prompt")
+  of oaSendInstruction, oaInstructManager: ("POST", "/api/v1/sessions/" & s & "/prompt")
+  of oaStopSession: ("POST", "/api/v1/sessions/" & s & "/stop")
+  of oaLaunchTask: ("POST", "/api/v1/tasks")
   of oaDecideApproval:
     # The two approval kinds have their own collections.
     if action.scope == asNetwork:
@@ -179,7 +214,7 @@ proc routeOf*(action: OperatorAction): tuple[verb, path: string] =
   of oaSetPriority: ("PATCH", "/api/v1/sessions/" & s)
   of oaMarkViewing: ("PUT", "/api/v1/sessions/" & s & "/viewing")
   of oaCancelLogin, oaApproveSpecChange, oaRequestSpecChanges, oaRevertSpecChange,
-     oaApplyStaged, oaDiscardStaged: ("", "")
+     oaApplyStaged, oaDiscardStaged, oaStartInitiative: ("", "")
 
 proc targetOf*(action: OperatorAction): string =
   ## What the action acts on; one action per target is in flight at a time.
@@ -189,6 +224,14 @@ proc targetOf*(action: OperatorAction): string =
     "spec:" & action.taskId & ":" & action.specPath
   of oaSetPriority: "priority:" & action.server & ":" & action.sessionId
   of oaMarkViewing: "viewing:" & action.server & ":" & action.sessionId
+  # A stop is never queued behind the instruction it may be stopping, and
+  # each launch or new initiative is new work, not a second press on the
+  # manager's one request: their own keys. The same launch pressed twice
+  # keeps one key, so it is not sent twice.
+  of oaStopSession: "stop:" & action.server & ":" & action.sessionId
+  of oaLaunchTask: "launch:" & action.server & ":" & action.sessionId & ":" & action.text
+  of oaStartInitiative:
+    "initiative:" & action.server & ":" & action.sessionId & ":" & action.text
   else:
     if action.itemId.len > 0: "item:" & action.server & ":" & action.itemId
     else: "request:" & action.server & ":" & action.sessionId & ":" & action.requestId
@@ -210,6 +253,7 @@ proc `$`*(action: OperatorAction): string =
   if action.kind == oaDecideApproval: parts.add "scope=" & $action.scope
   field("priority", action.priority)
   if action.choices.len > 0: parts.add "choices=" & action.choices.join(",")
+  for (name, value) in action.params: field(name, value)
   if action.text.len > 0: parts.add "text=" & action.text.escape
   if action.password.isSet: parts.add "secret supplied"
   parts.join(" ")
