@@ -43,6 +43,7 @@ type
     oaLaunchTask = "launch-task"               ## new work, with its launch options
     oaStartInitiative = "start-initiative"     ## a new initiative and its plan
     oaStopSession = "stop-session"             ## stop the turn a session runs
+    oaDecideSuggestion = "decide-suggestion"   ## approve or dismiss an agent's suggested UI actions
 
   ApprovalScope* = enum
     ## What a sudo or network approval asks for; each has its own route.
@@ -186,6 +187,15 @@ proc stopSession*(sessionId: string; server = ""): OperatorAction =
   ## Stops the turn the session is running.
   OperatorAction(kind: oaStopSession, sessionId: sessionId, server: server)
 
+proc decideSuggestion*(sessionId, requestId, decision: string;
+                       approvedIds: seq[string] = @[]; server = ""): OperatorAction =
+  ## The operator's decision about an agent's `suggest_actions` request
+  ## (agent-harbor `specs/UI-Introspection-and-Steering-Broker.md`):
+  ## `decision` is `approve` (with the ids of the actions approved, in
+  ## `choices`) or `dismiss`.
+  OperatorAction(kind: oaDecideSuggestion, sessionId: sessionId, requestId: requestId,
+                 decision: decision, choices: approvedIds, server: server)
+
 const ViewingHeartbeatMs* = 20_000
   ## How often a visible item's page repeats `markViewing`.
 
@@ -215,6 +225,9 @@ proc routeOf*(action: OperatorAction): tuple[verb, path: string] =
   of oaMarkViewing: ("PUT", "/api/v1/sessions/" & s & "/viewing")
   of oaCancelLogin, oaApproveSpecChange, oaRequestSpecChanges, oaRevertSpecChange,
      oaApplyStaged, oaDiscardStaged, oaStartInitiative: ("", "")
+  # Agent Harbor documents the request (`suggest_actions`) but no route for
+  # the front-end's answer yet: proposed only.
+  of oaDecideSuggestion: ("", "")
 
 proc targetOf*(action: OperatorAction): string =
   ## What the action acts on; one action per target is in flight at a time.
