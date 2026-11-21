@@ -23,6 +23,7 @@
 ## reported as such.
 
 import std/[json, strutils]
+import ./activity_words
 
 type
   DeliverableCounts* = object
@@ -44,6 +45,13 @@ type
     completedMilestones*: int
     progressPercent*: int
     currentMilestoneTitle*: string
+
+  PlanProgress* = object
+    ## A session's progress: the steps of the latest plan it reported, done
+    ## of all (`planProgressOf`). `total` 0 is a session with no plan, or a
+    ## plan with no step: its progress is unknown, never "0 %" and never
+    ## done. An initiative's progress is its milestones (`MilestoneSummary`).
+    done*, total*: int
 
   MilestoneFileProgress* = object
     path*: string
@@ -138,6 +146,16 @@ proc summarize*(progress: var MilestoneFileProgress) =
     if m.id == progress.currentMilestone:
       progress.summary.currentMilestoneTitle = m.title
       break
+
+proc planProgressOf*(eventsOldestFirst: openArray[JsonNode]): PlanProgress =
+  ## A session's progress from its event history: the latest `plan` event's
+  ## steps (`activity_words.planStepsOf`), done of all. A later plan replaces
+  ## an earlier one whole, as the agent re-sends its whole plan. None when
+  ## the history holds no plan.
+  for event in eventsOldestFirst:
+    if event.fieldStr("type") == "plan":
+      let steps = planStepsOf(event)
+      result = PlanProgress(done: steps.done, total: steps.total)
 
 proc parseMilestoneFile*(path, content: string): MilestoneFileProgress =
   ## A plan's progress, as the server computes it.

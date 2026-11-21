@@ -72,6 +72,27 @@ proc fieldChild*(node: JsonNode; key: string): JsonNode =
   if node.isNil or node.kind != JObject: return nil
   node.getOrDefault(key)
 
+type
+  PlanSteps* = object
+    ## A `plan` event's steps, counted: every entry, those `completed`, and
+    ## those `in_progress`. The one reading of a plan event's entries: its
+    ## activity line (`Plan: 3 steps, 2 done, 1 in progress`) and a
+    ## session's plan progress (`initiatives.planProgressOf`,
+    ## `session_replay.foldEvent`) both count them here.
+    total*, done*, active*: int
+
+proc planStepsOf*(event: JsonNode): PlanSteps =
+  ## The steps of a `plan` event (`entries`, each with a `status`); none when
+  ## it has no entry list.
+  let entries = event.fieldChild("entries")
+  if entries.isNil or entries.kind != JArray: return
+  for entry in entries:
+    inc result.total
+    case entry.fieldStr("status")
+    of "in_progress": inc result.active
+    of "completed": inc result.done
+    else: discard
+
 proc requestLabel*(request: string): string =
   ## A readable name for an input request id. The server names a request
   ## either by its source (`claude-stop-hook`) or as
@@ -183,17 +204,9 @@ proc activityLine*(node: JsonNode): ActivityLine =
     result.text = "Read " & node.fieldStr("file_path")
   of "plan":
     result.kind = fakPlan
-    let entries = node.fieldChild("entries")
-    var total, active, done = 0
-    if not entries.isNil and entries.kind == JArray:
-      for entry in entries:
-        inc total
-        case entry.fieldStr("status")
-        of "in_progress": inc active
-        of "completed": inc done
-        else: discard
+    let steps = planStepsOf(node)
     result.text = (if node.fieldFlag("is_update"): "Plan updated: " else: "Plan: ") &
-      $total & " steps, " & $done & " done, " & $active & " in progress"
+      $steps.total & " steps, " & $steps.done & " done, " & $steps.active & " in progress"
   of "user_input":
     # The instruction itself may quote private prompt text: named, never echoed.
     result.kind = fakUserInput
