@@ -356,6 +356,47 @@ const plan = """#+TITLE: Storage Layer Milestones
     - [ ] Flag flipped
 """
 
+suite "plan progress":
+  # A session's progress is the latest plan it reported: its steps, done of
+  # all. The plan events are written as Agent Harbor's history sends them.
+  proc plan(statuses: openArray[string]; update = false): JsonNode =
+    var entries = newJArray()
+    for i, status in statuses:
+      entries.add %*{"content": "step " & $i, "status": status}
+    %*{"type": "plan", "is_update": update, "entries": entries, "timestamp": 0}
+
+  test "a plan event's steps are counted once, for its line and its progress":
+    let e = plan(["completed", "completed", "in_progress", "pending"], update = true)
+    check planStepsOf(e) == PlanSteps(total: 4, done: 2, active: 1)
+    check activityFromJson(e).text == "Plan updated: 4 steps, 2 done, 1 in progress"
+    check planStepsOf(%*{"type": "plan"}) == PlanSteps()
+    check planStepsOf(%*{"type": "plan", "entries": "not a list"}) == PlanSteps()
+
+  test "the latest plan wins, whole; no plan is unknown progress":
+    check planProgressOf([]) == PlanProgress()
+    check planProgressOf([%*{"type": "status", "status": "running"}]).total == 0
+    let history = [plan(["pending", "pending", "pending"]),
+                   %*{"type": "status", "status": "running"},
+                   plan(["completed", "in_progress"], update = true)]
+    check planProgressOf(history) == PlanProgress(done: 1, total: 2)
+    check planProgressOf(history[0 .. 1]) == PlanProgress(done: 0, total: 3)
+
+  test "a folded history carries the plan progress, and a replay starts with none":
+    let history = [%*{"type": "status", "status": "running", "timestamp": 0},
+                   plan(["completed", "pending", "pending"]),
+                   plan(["completed", "completed", "pending"], update = true)]
+    let listed = FleetSession(id: "s", planDone: 9, planTotal: 9)
+    let atStart = listed.sessionAt(history, 1, 0)
+    check (atStart.planDone, atStart.planTotal) == (0, 0)
+    let atFirst = listed.sessionAt(history, 2, 0)
+    check (atFirst.planDone, atFirst.planTotal) == (1, 3)
+    let atEnd = listed.sessionAt(history, 3, 0)
+    check (atEnd.planDone, atEnd.planTotal) == (2, 3)
+    # One event at a time (a live fleet's step) reads the same.
+    var live = FleetSession(id: "s", status: fsRunning)
+    for i, e in history: live.foldEvent(e, i + 1, 0)
+    check (live.planDone, live.planTotal) == (2, 3)
+
 suite "initiatives":
   test "a plan's progress is what the server computes":
     let p = parseMilestoneFile("Storage.milestones.org", plan)

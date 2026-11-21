@@ -109,6 +109,12 @@ type
     planId*: string
       ## The plan (initiative) the session was launched for (`plan`); empty
       ## when it was launched for none or the server does not say.
+    planDone*, planTotal*: int
+      ## The session's own plan progress: the steps of the latest `plan`
+      ## event of its history, done of all (`activity_words.planStepsOf`).
+      ## Filled where a history is read (`session_replay.foldEvent`); the
+      ## listing carries no plan, so both stay 0 -- unknown progress -- for
+      ## a session whose events were never folded, or that reported no plan.
 
   FleetSnapshot* = object
     ## A whole fleet listing as one value. `capturedAtMs` is the instant the

@@ -12,7 +12,9 @@
 ##   `agent question (<agent>): …`), the session waits for an answer;
 ## - the recent events: the last three kept, oldest first, as the listing
 ##   carries them;
-## - the update time: the last kept event's.
+## - the update time: the last kept event's;
+## - the plan progress: the last kept `plan` event's steps, done of all
+##   (`planDone`, `planTotal`; none before the first plan).
 ##
 ## Everything else (prompt, agent, workspace) is the session's own.
 ##
@@ -66,6 +68,11 @@ proc foldEvent*(session: var FleetSession; event: JsonNode; ordinal: int;
   if takeStatus and event{"type"}.getStr == "status":
     session.rawStatus = event{"status"}.getStr
     session.status = parseFleetStatus(session.rawStatus)
+  if event{"type"}.getStr == "plan":
+    # The latest plan replaces the progress whole (`planStepsOf`).
+    let steps = planStepsOf(event)
+    session.planDone = steps.done
+    session.planTotal = steps.total
   var line = activityFromJson(event)
   line.timestampMs = at
   session.recent.add line
@@ -100,6 +107,8 @@ proc sessionAt*(session: FleetSession; eventsOldestFirst: openArray[JsonNode];
   result.awaitingInputSource = ""
   result.endedAtMs = 0
   result.recent = @[]
+  result.planDone = 0
+  result.planTotal = 0
   result.startedAtMs = startMs
   result.createdAtMs = startMs
   result.updatedAtMs = startMs
