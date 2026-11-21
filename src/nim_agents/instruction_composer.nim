@@ -237,6 +237,11 @@ type
     recent*: seq[ComposerRecord] ## newest first
     launch*: LaunchOptions
     initiative*: NewInitiativeForm
+    intentChosen*: bool
+      ## The operator said what is being composed (`chooseIntent`: the
+      ## control center's `New task` / `New initiative`), so the router's
+      ## intent no longer decides it.
+    chosenIntent*: RouteIntent
 
 const
   RecentLimit* = 5
@@ -292,6 +297,34 @@ func gazePausedChip*(): ContextItem =
               detail: "Gaze tracking is paused; nothing you look at is attached",
               note: true)
 
+func gazeNothingChip*(): ContextItem =
+  ## While tracking, when the gaze rested on nothing the window can attach:
+  ## a note that says so, never cited (as `Gaze paused`), so the operator
+  ## sees that tracking is on and that nothing was taken from it.
+  ContextItem(id: "gaze-nothing", kind: ckGaze, label: "Looked at nothing in view",
+              detail: "Gaze tracking is on; your gaze rested on nothing this " &
+                      "window can attach", note: true)
+
+func gazeMarkTooltip*(state: GazeState; chord: string): string =
+  ## The status line mark's tooltip, which names the key that pauses (or
+  ## resumes) tracking; "" when off, as there is no mark. `chord` is the
+  ## key as the front-end's keymap names it.
+  let key = if chord.len > 0: chord else: "The gaze key"
+  case state
+  of gsOff: ""
+  of gsTracking: "Gaze tracking is on: what you look at can be attached to " &
+                 "an instruction. " & key & " pauses it."
+  of gsPaused: "Gaze tracking is paused: nothing you look at is attached. " &
+               key & " resumes it."
+
+func toggledGaze*(state: GazeState): GazeState =
+  ## The pause key: tracking pauses, paused resumes; off stays off (the key
+  ## never turns tracking on, which is opt-in).
+  case state
+  of gsOff: gsOff
+  of gsTracking: gsPaused
+  of gsPaused: gsTracking
+
 func gazeMark*(state: GazeState): tuple[shown: bool, text: string] =
   ## The status line's mark: shown while tracking or paused, never when off.
   case state
@@ -333,6 +366,7 @@ func intentOf*(d: ComposerDraft): RouteIntent =
   ## The intent of what is being composed or was sent: a launch or a new
   ## initiative goes to a manager only; sent elsewhere it is an instruction.
   if d.phase != cpComposing and not d.awaitingRoute: d.sentIntent
+  elif d.intentChosen and d.chosen == tkManager: d.chosenIntent
   elif d.decided and d.chosen == tkManager: d.decision.intent
   else: riInstruct
 
@@ -342,10 +376,17 @@ proc dropDecision(d: var ComposerDraft) =
   d.routeError = ""
   d.route = rsNone
 
+func defaultTarget(d: ComposerDraft): TargetKind =
+  ## The destination shown before a decision: the manager while the
+  ## operator's chosen intent stands (`chooseIntent`), else the first
+  ## available one.
+  if d.intentChosen and d.isAvailable(tkManager): tkManager else: d.firstAvailable
+
 proc resetChoices(d: var ComposerDraft) =
-  ## A new instruction: the operator's destination and citations go.
+  ## A new instruction: the operator's destination and citations go (the
+  ## intent the operator chose stands).
   d.operatorChose = false
-  d.chosen = d.firstAvailable
+  d.chosen = d.defaultTarget
   for c in d.context.mitems:
     c.excluded = false
     c.pinned = false
@@ -366,7 +407,7 @@ proc setText*(d: var ComposerDraft; text: string) =
   d.text = text
   d.dropDecision()
   if text.strip.len == 0: d.resetChoices()
-  elif not d.operatorChose: d.chosen = d.firstAvailable
+  elif not d.operatorChose: d.chosen = d.defaultTarget
 
 func cited*(d: ComposerDraft): seq[ContextItem] =
   ## What the instruction carries: the decision's citations and the
@@ -444,7 +485,7 @@ proc applyDecision*(d: var ComposerDraft; decision: RoutingDecision): bool =
   d.decision = accepted
   d.decided = true
   d.route = rsDecided
-  if not d.operatorChose: d.chosen = decision.target
+  if not d.operatorChose and not d.intentChosen: d.chosen = decision.target
   true
 
 proc applyRouteFailure*(d: var ComposerDraft; reason: string): bool =
@@ -472,6 +513,27 @@ proc choose*(d: var ComposerDraft; kind: TargetKind): bool =
   d.operatorChose = true
   true
 
+proc chooseIntent*(d: var ComposerDraft; intent: RouteIntent): bool =
+  ## The operator says what is being composed, as the control center's
+  ## `New task` and `New initiative` do: a launch or a new initiative goes
+  ## to the manager, whatever the router decides, and its form applies; the
+  ## choice stands for every instruction after it. `riInstruct` gives the
+  ## decision back to the router. True when it changed something; refused
+  ## once sent, and for a launch when the window offers no manager.
+  if d.phase != cpComposing: return false
+  if intent == riInstruct:
+    if not d.intentChosen: return false
+    d.intentChosen = false
+    d.chosenIntent = riInstruct
+    return true
+  if not d.isAvailable(tkManager): return false
+  if d.intentChosen and d.chosenIntent == intent and d.chosen == tkManager:
+    return false
+  d.intentChosen = true
+  d.chosenIntent = intent
+  d.chosen = tkManager
+  true
+
 proc validateLaunch*(o: LaunchOptions): seq[LaunchProblem]
 proc validateInitiative*(f: NewInitiativeForm): seq[LaunchProblem]
 
@@ -496,7 +558,7 @@ proc beginSend*(d: var ComposerDraft): bool =
   ## says so). Refused for an empty instruction, an unreachable destination,
   ## or a form with problems.
   if d.phase != cpComposing or d.text.strip.len == 0: return false
-  if d.route == rsRouting and not d.operatorChose:
+  if d.route == rsRouting and not d.operatorChose and not d.intentChosen:
     d.awaitingRoute = true
     d.phase = cpSending
     return true

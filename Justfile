@@ -23,6 +23,7 @@ build-native:
     nim c {{paths}} tests/test_instruction_composer.nim
     nim c {{paths}} tests/test_result_commands.nim
     nim c {{paths}} tests/test_suggested_actions.nim
+    nim c {{paths}} tests/test_control_center.nim
 
 build-js:
     nim js {{paths}} tests/test_agents.nim
@@ -37,6 +38,7 @@ build-js:
     nim js {{paths}} tests/test_instruction_composer.nim
     nim js {{paths}} tests/test_result_commands.nim
     nim js {{paths}} tests/test_suggested_actions.nim
+    nim js {{paths}} tests/test_control_center.nim
 
 test: test-native test-js
 
@@ -46,6 +48,7 @@ test-native:
     nim c -r {{paths}} tests/test_instruction_composer.nim
     nim c -r {{paths}} tests/test_result_commands.nim
     nim c -r {{paths}} tests/test_suggested_actions.nim
+    nim c -r {{paths}} tests/test_control_center.nim
     nim c -r {{paths}} tests/test_agent_harbor_domain.nim
     nim c -r {{paths}} tests/test_agent_harbor_fleet_fold.nim
     nim c -r {{paths}} tests/test_review_record.nim
@@ -68,6 +71,7 @@ test-js:
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_instruction_composer.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_result_commands.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_suggested_actions.nim
+    bash tools/nim-js-test-gate.sh {{paths}} tests/test_control_center.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_agent_harbor_domain.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_agent_harbor_fleet_fold.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_review_record.nim
