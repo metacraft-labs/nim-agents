@@ -3,8 +3,9 @@
 Shared composition layer over ACP and Agent Harbor.
 
 Commands:
-- `just build`: compile native and JS targets.
-- `just test`: run native and JS tests.
+- `just build`: `repro build`, compiling the native and JS test modules.
+- `just test`: `repro test`, running the native and JS tests (JS under node).
+- `just test-js`: the JS tests through `tools/nim-js-test-gate.sh`, which also checks the log for failure sentinels and an `[OK]` line.
 - `just lint`: run Nim and Nix checks.
 - `just format`: format Nim and Nix sources.
 

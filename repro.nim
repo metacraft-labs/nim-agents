@@ -52,12 +52,29 @@
 ## ``nimPathDirs`` channel off the three ``uses:`` edges, replacing the
 ## ``Justfile``'s hardcoded ``--path:../nim-*/src``.
 ##
-## **Native-only build.** The ``Justfile`` also builds a JS target
-## (``nim js``) for ``test_agents`` / ``test_consumers``, but the engine
-## test template compiles native (``nim c``). All five test files compile +
-## run native to exit 0 on this host; the JS matrix cell is a Justfile-only
-## concern (the reprobuild rollout scope is the native corpus). No native
-## test is dropped and none is run off its OS.
+## **Native and JavaScript builds.** The ``Justfile`` builds and runs a JS
+## matrix (``nim js``, run under ``node``) next to the native one. The native
+## corpus uses the engine test template (``nim c``); the JS matrix is declared
+## below with the typed ``nim.js`` constructor (BUILD edge) and the typed
+## ``node`` tool (EXECUTE edge). Two JS shapes mirror the two recipes:
+##
+##   * ``build-js`` compiles the files of ``agentsJsBuildStems`` WITHOUT ``-d:nodejs`` (the browser
+##     target) and never runs them: compile-only edges, collected into
+##     ``js-build``.
+##   * ``test-js`` compiles the files of ``agentsJsTestStems`` with ``-d:nodejs`` (what ``nim js -r``
+##     adds implicitly, and what makes a failing ``unittest`` exit non-zero
+##     under ``node``) and runs each emitted ``.js`` under ``node``: a BUILD +
+##     EXECUTE pair per file, collected into ``js-test-builds`` / ``js-test``
+##     and also folded into ``test-builds`` / ``test``.
+##
+## The ``Justfile`` runs the JS tests through ``tools/nim-js-test-gate.sh``,
+## which additionally greps the log for failure sentinels and requires an
+## ``[OK]`` line. The graph keys on ``node``'s exit status instead, so a JS test
+## module that registers no test at all passes here and fails there; the script
+## stays authoritative for ``just test-js``, and CI's ``ci.yml`` runs it.
+##
+## ``tests/test_nimcache_is_worktree_local.nim`` is an ordinary native pair: it
+## passes under ``repro`` because the repo-root ``config.nims`` still applies.
 ##
 ## **Per-test platform gating.** Re-derived from each file's imports + guards
 ## (the nimble/Justfile lists are the same five files; every one is
@@ -128,6 +145,24 @@ type
     binary: string
     serial: bool
 
+# Stems of the JS matrix. ``build-js`` compiles ``agentsJsBuildStems`` for the
+# browser target (compile-only); ``test-js`` compiles and runs
+# ``agentsJsTestStems`` under node. Keep both in step with the Justfile.
+const agentsJsBuildStems: seq[string] = @[
+  "test_agents", "test_consumers", "test_session_load_client",
+  "test_agent_harbor_domain", "test_agent_harbor_fleet_fold",
+  "test_activity_groups", "test_review_record", "test_change_diff",
+  "test_inbox", "test_instruction_composer", "test_result_commands",
+  "test_suggested_actions", "test_control_center",
+]
+const agentsJsTestStems: seq[string] = @[
+  "test_activity", "test_activity_groups", "test_agent_harbor_domain",
+  "test_agent_harbor_fleet_fold", "test_agents", "test_consumers",
+  "test_session_load_client", "test_review_record", "test_change_diff",
+  "test_inbox", "test_instruction_composer", "test_result_commands",
+  "test_suggested_actions", "test_control_center",
+]
+
 const agentsTestSpecs: seq[AgentsTestSpec] = @[
   AgentsTestSpec(source: "tests/test_harbor_lifecycle_threads.nim",
     binary: "build/test-bin/test_harbor_lifecycle_threads", serial: true),
@@ -138,6 +173,30 @@ const agentsTestSpecs: seq[AgentsTestSpec] = @[
     binary: "build/test-bin/test_acp_launch_prefix", serial: true),
   AgentsTestSpec(source: "tests/test_activity.nim",
     binary: "build/test-bin/test_activity", serial: false),
+  AgentsTestSpec(source: "tests/test_activity_groups.nim",
+    binary: "build/test-bin/test_activity_groups", serial: false),
+  AgentsTestSpec(source: "tests/test_agent_harbor_domain.nim",
+    binary: "build/test-bin/test_agent_harbor_domain", serial: false),
+  AgentsTestSpec(source: "tests/test_agent_harbor_fleet_fold.nim",
+    binary: "build/test-bin/test_agent_harbor_fleet_fold", serial: false),
+  AgentsTestSpec(source: "tests/test_session_load_client.nim",
+    binary: "build/test-bin/test_session_load_client", serial: false),
+  AgentsTestSpec(source: "tests/test_nimcache_is_worktree_local.nim",
+    binary: "build/test-bin/test_nimcache_is_worktree_local", serial: false),
+  AgentsTestSpec(source: "tests/test_review_record.nim",
+    binary: "build/test-bin/test_review_record", serial: false),
+  AgentsTestSpec(source: "tests/test_change_diff.nim",
+    binary: "build/test-bin/test_change_diff", serial: false),
+  AgentsTestSpec(source: "tests/test_inbox.nim",
+    binary: "build/test-bin/test_inbox", serial: false),
+  AgentsTestSpec(source: "tests/test_instruction_composer.nim",
+    binary: "build/test-bin/test_instruction_composer", serial: false),
+  AgentsTestSpec(source: "tests/test_result_commands.nim",
+    binary: "build/test-bin/test_result_commands", serial: false),
+  AgentsTestSpec(source: "tests/test_suggested_actions.nim",
+    binary: "build/test-bin/test_suggested_actions", serial: false),
+  AgentsTestSpec(source: "tests/test_control_center.nim",
+    binary: "build/test-bin/test_control_center", serial: false),
   AgentsTestSpec(source: "tests/test_agents.nim",
     binary: "build/test-bin/test_agents", serial: false),
   AgentsTestSpec(source: "tests/test_consumers.nim",
@@ -175,6 +234,8 @@ package nim_agents:
     # runner so Windows resolves the SDK's authenticated just package.
     "just >=1"
     "python3 >=3.9"
+    # Runs the ``nim js`` output of the JS test matrix (``node`` typed tool).
+    "node >=20"
 
     # Sibling Nim-library producers (SC-11 develop-mode from-source
     # consumption). ``src/nim_agents/client.nim`` + ``src/nim_agents.nim`` +
@@ -262,6 +323,55 @@ package nim_agents:
     for spec in agentsTestSpecs:
       emitTestPair(spec.source, spec.binary, spec.serial,
         testBuildActions, testExecuteActions)
+
+
+    # --- JavaScript back-end matrix ----------------------------------------
+    # ``build-js``: compile-only for the browser target (no ``-d:nodejs``),
+    # exactly as the recipe does; nothing runs the output, so no EXECUTE edge.
+    var jsBuildActions: seq[BuildActionDef] = @[]
+    for stem in agentsJsBuildStems:
+      let jsBuildEdge = nim.js(
+        source = "tests/" & stem & ".nim",
+        # ``.browser.js``: the implicit target name is the output basename, and
+        # ``test-js`` below emits ``<stem>.js`` for the same stems.
+        output = "build/js/" & stem & ".browser.js",
+        paths = @["src"],
+        actionId = "nim_agents.js_build." & stem,
+        extraInputs = @["src", "nim_agents.nimble"])
+      jsBuildActions.add(jsBuildEdge)
+
+    # ``test-js``: ``nim js -r`` implies ``-d:nodejs`` (emit ``process.exit``).
+    # Without it a failing ``unittest`` ``quit(1)`` is a no-op in the emitted
+    # JS and ``node`` would exit 0 on a failed assertion, so the edge adds it
+    # itself. The compile and the run are two edges so a change that leaves the
+    # emitted JS identical does not re-run the tests.
+    var jsTestBuildActions: seq[BuildActionDef] = @[]
+    var jsTestExecuteActions: seq[BuildActionDef] = @[]
+    for stem in agentsJsTestStems:
+      let jsOut = "build/js-test/" & stem & ".js"
+      let jsTestBuildEdge = nim.js(
+        source = "tests/" & stem & ".nim",
+        output = jsOut,
+        defines = @["nodejs"],
+        paths = @["src"],
+        actionId = "nim_agents.js_test_build." & stem,
+        extraInputs = @["src", "nim_agents.nimble"])
+      let jsTestExecuteEdge = node(
+        args = @[jsOut],
+        actionId = "nim_agents.js_test_execute." & stem,
+        after = @[jsTestBuildEdge],
+        extraInputs = @[jsOut])
+      jsTestBuildActions.add(jsTestBuildEdge)
+      jsTestExecuteActions.add(jsTestExecuteEdge)
+
+    discard collect("js-build", jsBuildActions)
+    discard collect("js-test-builds", jsTestBuildActions)
+    discard collect("js-test", jsTestExecuteActions)
+    # The Justfile's ``test`` / ``build`` span both back-ends, so the JS halves
+    # also join the aggregate collections.
+    testBuildActions.add(jsBuildActions)
+    testBuildActions.add(jsTestBuildActions)
+    testExecuteActions.add(jsTestExecuteActions)
 
     discard collect("test", testExecuteActions)
     discard collect("test-builds", testBuildActions)

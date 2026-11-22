@@ -3,7 +3,11 @@ alias fmt := format
 
 paths := "--path:src --path:../nim-everywhere/src --path:../nim-acp/src --path:../nim-agent-harbor/src"
 
-build: build-native build-js
+# Build: compile every test module, native and JS, through the reprobuild graph
+# (`repro.nim`). CI runs the same command. `build-native` and `build-js` below
+# compile the same modules directly with the compiler, for a quick edit loop.
+build:
+    repro build .#test-builds
 
 build-native:
     nim c {{paths}} tests/test_acp_launch_prefix.nim
@@ -40,7 +44,15 @@ build-js:
     nim js {{paths}} tests/test_suggested_actions.nim
     nim js {{paths}} tests/test_control_center.nim
 
-test: test-native test-js
+# Test: run the native and JS test corpus through `repro test` (one build edge
+# and one execute edge per module; the JS modules run under node). CI runs the
+# same command. `test-native` and `test-js` below run the same modules directly
+# with the compiler. `test-js` also applies `tools/nim-js-test-gate.sh`, which
+# additionally fails a module whose log has a failure sentinel or no `[OK]`
+# line; the graph keys on the exit status of `node` and does not read the log,
+# so that stricter check lives only in `test-js`.
+test:
+    repro test
 
 test-native:
     nim c -r {{paths}} tests/test_activity.nim

@@ -45,7 +45,10 @@ jobs:
       # `bash -e` WITHOUT pipefail, so `cmd | tee` takes tee's exit status and a
       # failing command was reported as a passing job. `shell: bash` selects
       # `bash --noprofile --norc -eo pipefail`.
-      - run: dev-exec just test 2>&1 | tee test.log
+      # `just test` is `repro test`, which ci-reprobuild.yml runs on all five
+      # legs. What it does not cover is the JS gate's log checks (a failure
+      # sentinel, or no `[OK]` line), so this job runs `just test-js`.
+      - run: dev-exec just test-js 2>&1 | tee test.log
         shell: bash
       - uses: actions/upload-artifact@v4
         if: always()

@@ -84,24 +84,15 @@ jobs:
           gh-token: ${{ steps.ci_token.outputs.token }}
 
       - name: repro build
-        # Builds the conventional `build` collection declared in
-        # `repro.nim`. Verifies the primary shipping artefact (the
-        # recorder binary or extension) materialises through the
-        # reprobuild engine identically to `just build`.
+        # Compiles every native and JS test module declared in `repro.nim`
+        # (the `test-builds` collection, which is also what a bare
+        # `repro build` builds). `just build` runs the same command.
         run: dev-exec repro build
 
       - name: repro test
-        # Materialises the `test` collection.
+        # Materialises the `test` collection: runs every native test and
+        # every JS test under node. `just test` runs the same command.
         run: dev-exec repro test
-
-      - name: just build (cross-check)
-        # Re-runs the legacy `just build` path inside the same env so
-        # we catch silent divergences between `repro build` outputs
-        # and what the dev shell + Justfile produce today.
-        run: dev-exec just build
-
-      - name: just test (cross-check)
-        run: dev-exec just test
 
       # Diagnostics on failure. Three things below are load-bearing:
       #
