@@ -30,9 +30,13 @@
 ## and never sorts; adds a platform run for an event naming a platform the
 ## run did not create rather than dropping it; tolerates a repeated
 ## `run-started` for a platform it knows (its finished tests are kept) and a
-## `trace-created` before its test's `test-finished`; and on a cancelled
+## `trace-created` before its test's `test-finished`; on a cancelled
 ## `run-finished` marks every unfinished cell of that platform `cancelled`,
-## keeping the finished ones. Illegal orders change nothing: an event naming
+## keeping the finished ones; and on any other `run-finished` makes every
+## cell of that platform that heard no event of its test (still `queued`)
+## `not run`, `unreached`, since the run ended before reaching it (a
+## provisional decision; its words are `UnreachedText`). A later
+## `run-started` of that platform queues those cells again. Illegal orders change nothing: an event naming
 ## no platform, a test's event naming no test, a `test-started` for a cell
 ## that already has its result (a cancelled cell has none), and a `test-started` or `trace-started` on a
 ## platform run that has finished (until its next `run-started`). A reused
@@ -179,6 +183,9 @@ type
     trace*: string
     backend*, runner*: string
     diagnostics*: seq[Diagnostic]
+    unreached*: bool
+      ## `not run` because its platform run ended before reaching it (see
+      ## `UnreachedText`), not because no run asked for it.
 
   PlatformRunState* = enum
     prsQueued = "queued"         ## created, before its `run-started`
@@ -237,6 +244,9 @@ const
   NotDiscoveredText* = "not discovered"
   RunInProgressOnPlatformText* = "A run is already in progress on this platform"
   RecordingDiscardedText* = "this test ran, but no recording was kept"
+  UnreachedText* = "The run on this platform ended before reaching this test"
+    ## Why a test a run asked for is `not run` once that platform run ended
+    ## without an event for it (`TestCell.unreached`).
     ## The Test Results pane's sentence for a test that ran and kept no
     ## recording, so both panes say the same.
 
@@ -645,9 +655,15 @@ proc applyTestRunEvent*(state: var TestRunState; event: TestRunEvent): bool =
   result = true
   case event.kind
   of tekRunStarted:
-    # Repeated for a platform it knows: running again, its cells kept.
+    # Repeated for a platform it knows: running again, its cells kept, and
+    # the tests an earlier end left unreached are queued again.
     run.state = prsRunning
     if event.runner.len > 0: run.runner = event.runner
+    let key = platformKey(run.platform)
+    for k, c in state.cells.mpairs:
+      if c.platform == key and c.unreached:
+        c.unreached = false
+        c.status = tsQueued
   of tekTestStarted:
     if run.state == prsQueued: run.state = prsRunning
     var c = state.cellFor(p, event.testId)
@@ -665,6 +681,7 @@ proc applyTestRunEvent*(state: var TestRunState; event: TestRunEvent): bool =
   of tekTestFinished:
     var c = state.cellFor(p, event.testId)
     c.status = statusOf(event.status)
+    c.unreached = false   # a late result is the test's own
     c.reused = event.reused and c.status == tsPassed
     if c.reused:
       # Not run: a certificate proved it. No duration, whatever was sent.
@@ -698,6 +715,12 @@ proc applyTestRunEvent*(state: var TestRunState; event: TestRunEvent): bool =
           c.status = tsCancelled
     else:
       run.state = prsFinished
+      # A test the run asked for and never reached (no event of it arrived)
+      # did not run: it is `not run`, with why, never left `queued`.
+      for k, c in state.cells.mpairs:
+        if c.platform == key and c.status == tsQueued:
+          c.status = tsNotRun
+          c.unreached = true
     # A recording started and never created, or one the run asked for and
     # never got, was not kept (the Test Results pane's discarded state).
     let wanted = state.record

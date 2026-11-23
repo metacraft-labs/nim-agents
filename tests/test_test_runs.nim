@@ -518,3 +518,54 @@ suite "illegal orders and malformed input":
       {"id": "pytest/a::t"}]})
     check catalog.tests.mapIt(it.name) == @["bare_test", "plain", "other/x", "a::t"]
     check catalog.tests.mapIt(it.runner) == @["", "", "pytest", "pytest"]
+
+suite "a platform run that ends without reaching a test":
+  test "an ended run leaves no queued cell: the tests it never reached are not run, with why":
+    var run = newRun()
+    run.apply(ev("run-started", Linux), finished(Linux, Tests[0], "passed"),
+              started(Linux, Tests[1]), ev("run-finished", Linux))
+    # Tests[2] and Tests[3] heard no event: not run, unreached. Tests[1]
+    # started, so it is not one of them.
+    check run.statuses(Linux) == @["passed", "running", "not-run", "not-run"]
+    check not run.cell(platformKey(Linux), Tests[0]).unreached
+    check not run.cell(platformKey(Linux), Tests[1]).unreached
+    check run.cell(platformKey(Linux), Tests[2]).unreached
+    check run.cell(platformKey(Linux), Tests[3]).unreached
+    check UnreachedText == "The run on this platform ended before reaching this test"
+    check run.platformRuns[0].state == prsFinished
+    # The other platform, still queued, is untouched.
+    check run.statuses(Mac) == @["queued", "queued", "queued", "queued"]
+    check not run.cell(platformKey(Mac), Tests[2]).unreached
+    # Not run is no result: the counts hold only what ran.
+    check run.countsOf(platformKey(Linux)) == TestCounts(passed: 1)
+
+  test "a platform run that ends before its first event leaves every cell not run":
+    var run = newRun()
+    run.apply(ev("run-finished", Mac))
+    check run.statuses(Mac) == @["not-run", "not-run", "not-run", "not-run"]
+    for id in Tests: check run.cell(platformKey(Mac), id).unreached
+    check run.rollupOf(Tests[0]) == tsQueued     # Linux is still queued
+    run.apply(ev("run-finished", Linux))
+    check run.rollupOf(Tests[0]) == tsNotRun
+    check not run.isActive
+
+  test "a cancelled run keeps its own cancelled, never not run":
+    var run = newRun()
+    run.apply(ev("run-started", Linux), finished(Linux, Tests[0], "passed"),
+              ev("run-finished", Linux, %*{"cancelled": true}))
+    check run.statuses(Linux) == @["passed", "cancelled", "cancelled", "cancelled"]
+    for id in Tests: check not run.cell(platformKey(Linux), id).unreached
+
+  test "the platform started again queues its unreached tests; a late result is the test's own":
+    var run = newRun()
+    run.apply(ev("run-started", Linux), finished(Linux, Tests[0], "passed"),
+              ev("run-finished", Linux))
+    check run.statuses(Linux) == @["passed", "not-run", "not-run", "not-run"]
+    # A result that arrives after the end is kept, and is no longer unreached.
+    run.apply(finished(Linux, Tests[3], "failed"))
+    check run.cell(platformKey(Linux), Tests[3]).status == tsFailed
+    check not run.cell(platformKey(Linux), Tests[3]).unreached
+    run.apply(ev("run-started", Linux))
+    check run.statuses(Linux) == @["passed", "queued", "queued", "failed"]
+    check not run.cell(platformKey(Linux), Tests[1]).unreached
+    check run.isActive
