@@ -85,6 +85,16 @@
 ## (`commandTraceFromJson`). A command without one has no trace, and a view
 ## says so.
 ##
+## **Test runs.** A test run of the session (`applyTestRun`) is an item of
+## its own kind, `tikTestRun`, folded at the run's start time with the line
+## the caller gives it (`test_runs.summaryLine`). It is never a member of a
+## group and never hidden inside one, and it does not change any other
+## line: the event lines are grouped exactly as they would be without it,
+## and the run's line is placed after the line (single, or a whole group)
+## that started at or before the run's start, so a run that started while a
+## group was growing stands after that group. A run with no start time
+## stands last. Updating a run (its line, its state) moves nothing else.
+##
 ## What crosses into an item: the event's line (`activity_words`, the words
 ## every view uses), its structured fields, and the operator's or agent's
 ## own text where the server gives it (an item's `body`); a question's prompt
@@ -118,6 +128,7 @@ type
     tikCompleted = "completed"
     tikCancelled = "cancelled"
     tikOther = "other"
+    tikTestRun = "test-run"      ## a test run of the session (`applyTestRun`)
 
   TimelineItemState* = enum
     tisNone = "none"             ## an item with no run state
@@ -176,6 +187,7 @@ type
       ## A wait's kind as the server refined it (`turn_ended`,
       ## `question_pending`, `unknown`); "" until a kind event names it.
     trace*: Option[CommandTrace]
+    testRunId*: string           ## a `tikTestRun` item's run
     entry: int                   ## the reducer entry it shows
 
   TimelineDetail* = object
@@ -238,6 +250,14 @@ type
     nodes: seq[TimelineNode]
     byEntry: Table[string, int]
     seen: HashSet[string]
+    runs: seq[TimelineItem]
+      ## The test-run items, in the order first applied. While there are
+      ## none, the fold shows `items` and `nodes` as they are; with some, it
+      ## shows `shown` and `shownNodes`, the event items with the runs placed
+      ## among them (`arrange`).
+    shown: seq[TimelineItem]
+    shownNodes: seq[TimelineNode]
+    shownIndex: Table[string, int]
 
 const
   DefaultGapMs* = 5 * 60_000'i64
@@ -508,10 +528,19 @@ proc groupKindOf(kind: TimelineItemKind): TimelineGroupKind =
   of tikEdit: tgkEdit
   else: tgkRepeat
 
+proc previousEvent(items: openArray[TimelineItem]; i: int): int =
+  ## The index of the last item before `i` that is not a test run, or -1:
+  ## a test run's line takes no part in the gaps between event lines.
+  result = i - 1
+  while result >= 0 and items[result].kind == tikTestRun: dec result
+
 proc gapBefore(items: openArray[TimelineItem]; i: int; gapMs: int64): bool =
-  ## Whether a gap line goes before item `i`.
-  i > 0 and gapMs > 0 and items[i].atMs >= 0 and items[i - 1].atMs >= 0 and
-    items[i].atMs - items[i - 1].atMs >= gapMs
+  ## Whether a gap line goes before item `i`. Never before a test run's
+  ## line, and measured from the last event item, past any test run.
+  if i <= 0 or gapMs <= 0 or items[i].kind == tikTestRun: return false
+  let p = items.previousEvent(i)
+  p >= 0 and items[i].atMs >= 0 and items[p].atMs >= 0 and
+    items[i].atMs - items[p].atMs >= gapMs
 
 proc summarize(node: var TimelineNode; items: openArray[TimelineItem]) =
   ## A group's counts, from its items.
@@ -548,7 +577,8 @@ proc buildNodes(items: openArray[TimelineItem]; start: int;
     let item = items[i]
     if items.gapBefore(i, gapMs):
       result.add TimelineNode(id: "gap:" & item.id, kind: tnGap, first: i,
-                              last: i - 1, gapMs: item.atMs - items[i - 1].atMs)
+                              last: i - 1,
+                              gapMs: item.atMs - items[items.previousEvent(i)].atMs)
     if item.kind == tikOperator:
       result.add TimelineNode(id: item.id, kind: tnTurn, first: i, last: i)
       inc i
@@ -619,6 +649,72 @@ proc resummarize(fold: var TimelineFold; itemIndex: int) =
     if node.kind == tnGroup and node.first <= itemIndex and itemIndex <= node.last:
       node.summarize(fold.items)
 
+proc nodeStart(items: openArray[TimelineItem]; node: TimelineNode): int64 =
+  ## When a node starts: its first item's time (a gap's is the item after
+  ## it); -1 when that item has none.
+  if node.first < items.len: items[node.first].atMs else: -1'i64
+
+proc arrange(fold: var TimelineFold) =
+  ## Places the test runs among the event lines (`shown`, `shownNodes`):
+  ## each run after the last event node that started at or before it (a
+  ## node with no time counts as starting with the node before it), runs of
+  ## one place in their start order and then in the order applied; a run
+  ## with no start time last. The event nodes are kept as they are, only
+  ## renumbered, so a run never splits, joins or recounts a group.
+  fold.shown.setLen(0)
+  fold.shownNodes.setLen(0)
+  fold.shownIndex.clear()
+  if fold.runs.len == 0: return
+  let n = fold.nodes.len
+  var slots = newSeq[seq[int]](n + 1)     # runs to place before event node k
+  var effective = newSeq[int64](n)
+  var last = low(int64)
+  for k, node in fold.nodes:
+    let t = fold.items.nodeStart(node)
+    if t >= 0: last = t
+    effective[k] = last
+  var order = newSeq[int](fold.runs.len)
+  for r in 0 ..< fold.runs.len: order[r] = r
+  # Insertion sort by start time (none: last), stable on the order applied.
+  proc startKey(item: TimelineItem): int64 =
+    if item.atMs < 0: high(int64) else: item.atMs
+  for a in 1 ..< order.len:
+    var b = a
+    while b > 0 and fold.runs[order[b - 1]].startKey > fold.runs[order[b]].startKey:
+      swap(order[b - 1], order[b])
+      dec b
+  for r in order:
+    let t = fold.runs[r].atMs
+    var slot = n
+    if t >= 0:
+      slot = 0
+      for k in 0 ..< n:
+        if effective[k] <= t: slot = k + 1
+    slots[slot].add r
+  var turn = 0
+  proc boundary(fold: TimelineFold; k: int): int =
+    if k < fold.nodes.len: fold.nodes[k].first else: fold.items.len
+  var next = 0
+  for k in 0 .. n:
+    let upTo = fold.boundary(k)
+    while next < upTo:
+      turn = fold.items[next].turn
+      fold.shown.add fold.items[next]
+      inc next
+    for r in slots[k]:
+      var run = fold.runs[r]
+      run.turn = turn
+      fold.shownNodes.add TimelineNode(id: run.id, kind: tnItem,
+                                       first: fold.shown.len, last: fold.shown.len)
+      fold.shown.add run
+    if k < n:
+      var node = fold.nodes[k]
+      let shift = fold.shown.len - upTo
+      node.first += shift
+      node.last += shift
+      fold.shownNodes.add node
+  for i, item in fold.shown: fold.shownIndex[item.id] = i
+
 # ---------------------------------------------------------------------------
 # The fold
 # ---------------------------------------------------------------------------
@@ -679,7 +775,9 @@ proc apply*(fold: var TimelineFold; event: AgentEvent): TimelineChange =
   if event.sourceType == AwaitingKindEvent:
     fold.refineWait(event, result)
     result.changed = result.updated.len > 0
-    if result.changed: inc fold.revision
+    if result.changed:
+      inc fold.revision
+      if fold.runs.len > 0: fold.arrange()
     return
   let kind = itemKindOf(event, fold.policies)
   var data = event
@@ -729,7 +827,9 @@ proc apply*(fold: var TimelineFold; event: AgentEvent): TimelineChange =
             fold.items[i].kind in {tikAgent, tikThought}:
           discard fold.refreshItem(i, event)
   result.changed = result.newItems > 0 or result.updated.len > 0
-  if result.changed: inc fold.revision
+  if result.changed:
+    inc fold.revision
+    if fold.runs.len > 0: fold.arrange()
 
 proc applyJson*(fold: var TimelineFold; sessionId: string;
                 event: JsonNode): TimelineChange =
@@ -739,26 +839,73 @@ proc applyJson*(fold: var TimelineFold; sessionId: string;
   if event.isNil or event.kind != JObject: return
   fold.apply(harborEventToAgentEvent(sessionId, eventFromJson(event)))
 
+proc testRunItemId*(runId: string): string =
+  ## A test run's item id (and its line's node id).
+  "test-run:" & runId
+
+proc applyTestRun*(fold: var TimelineFold; runId: string; startedMs: int64;
+                   line: string; state = tisNone; body = ""): TimelineChange =
+  ## Folds a test run of the session as one item, `tikTestRun`, at its start
+  ## (milliseconds since the session started; -1 when unknown), with the line
+  ## the caller words (`test_runs.summaryLine`), its state (`tisRunning`
+  ## while a platform runs, then `tisOk` or `tisFailed`) and an optional
+  ## body. Applying the same run again updates it in place; its start time
+  ## is the first one given. No other line changes (see the module comment).
+  if runId.len == 0: return
+  let id = testRunItemId(runId)
+  var at = -1
+  for i, run in fold.runs:
+    if run.id == id: at = i
+  if at < 0:
+    fold.runs.add TimelineItem(id: id, kind: tikTestRun, atMs: startedMs, line: line,
+                               sourceType: "test-run", body: body, state: state,
+                               testRunId: runId, entry: -1)
+    inc result.newItems
+  else:
+    var run = fold.runs[at]
+    run.line = line
+    run.state = state
+    run.body = body
+    if run == fold.runs[at]: return
+    fold.runs[at] = run
+    result.updated.add id
+  result.changed = true
+  inc fold.revision
+  fold.arrange()
+
 # ---------------------------------------------------------------------------
 # Reading the fold
 # ---------------------------------------------------------------------------
 
-proc items*(fold: TimelineFold): seq[TimelineItem] = fold.items
-proc nodes*(fold: TimelineFold): seq[TimelineNode] = fold.nodes
-proc itemCount*(fold: TimelineFold): int = fold.items.len
+# What a reader sees: the event items and nodes as they are, or, once a test
+# run has been applied, the arrangement that places the runs among them.
+
+proc items*(fold: TimelineFold): seq[TimelineItem] =
+  if fold.runs.len == 0: fold.items else: fold.shown
+proc nodes*(fold: TimelineFold): seq[TimelineNode] =
+  if fold.runs.len == 0: fold.nodes else: fold.shownNodes
+proc itemCount*(fold: TimelineFold): int =
+  if fold.runs.len == 0: fold.items.len else: fold.shown.len
 proc timeline*(fold: TimelineFold): ActivityTimeline = fold.timeline
 
-proc item*(fold: TimelineFold; index: int): TimelineItem = fold.items[index]
+proc item*(fold: TimelineFold; index: int): TimelineItem =
+  if fold.runs.len == 0: fold.items[index] else: fold.shown[index]
 
 proc findItem*(fold: TimelineFold; id: string): int =
   ## The index of the item `id`, or -1.
-  fold.byEntry.getOrDefault(id, -1)
+  if fold.runs.len == 0: fold.byEntry.getOrDefault(id, -1)
+  else: fold.shownIndex.getOrDefault(id, -1)
 
 proc findNode*(fold: TimelineFold; id: string): int =
   ## The index of the top-level node `id`, or -1.
-  for i, node in fold.nodes:
+  let shown = if fold.runs.len == 0: fold.nodes else: fold.shownNodes
+  for i, node in shown:
     if node.id == id: return i
   -1
+
+proc testRuns*(fold: TimelineFold): seq[TimelineItem] =
+  ## The test-run items, in the order first applied.
+  fold.runs
 
 proc isSessionEnding*(item: TimelineItem): bool =
   ## The session's own ending (a `status` or `session_ended` event), as
@@ -771,13 +918,15 @@ proc repeatsFault*(fold: TimelineFold; index: int): bool =
   ## a session ending, whose item before is a `tikFailure` (the agent's own,
   ## or another ending). Read from the items, so a filter over the lines
   ## does not change it.
-  index > 0 and index < fold.items.len and
-    fold.items[index].kind == tikFailure and fold.items[index].isSessionEnding and
-    fold.items[index - 1].kind == tikFailure
+  if index <= 0 or index >= fold.itemCount: return false
+  var prev = index - 1
+  while prev >= 0 and fold.item(prev).kind == tikTestRun: dec prev
+  fold.item(index).kind == tikFailure and fold.item(index).isSessionEnding and
+    prev >= 0 and fold.item(prev).kind == tikFailure
 
 proc itemsOf*(fold: TimelineFold; node: TimelineNode): seq[TimelineItem] =
   ## A node's items (none for a gap).
-  for i in node.first .. node.last: result.add fold.items[i]
+  for i in node.first .. node.last: result.add fold.item(i)
 
 proc summary*(node: TimelineNode): string =
   ## A group line's words: `Read 4 files`, `Searched 3 times`, `Ran 2 shell
@@ -808,10 +957,10 @@ proc nodeText*(fold: TimelineFold; node: TimelineNode): string =
   of tnGap:
     let minutes = node.gapMs div 60_000
     if minutes >= 60: $(minutes div 60) & " h later" else: $minutes & " min later"
-  of tnTurn, tnItem: fold.items[node.first].line
+  of tnTurn, tnItem: fold.item(node.first).line
   of tnGroup:
     if node.groupKind == tgkRepeat:
-      fold.items[node.first].line & Times & $node.count
+      fold.item(node.first).line & Times & $node.count
     else:
       var parts = @[node.summary]
       if node.totalsText.len > 0: parts.add node.totalsText
@@ -823,7 +972,11 @@ proc detailOf*(fold: TimelineFold; id: string): TimelineDetail =
   ## body. An unknown id has no detail.
   let i = fold.findItem(id)
   if i < 0: return
-  let item = fold.items[i]
+  let item = fold.item(i)
+  if item.kind == tikTestRun:
+    # A test run has no reducer entry: its detail is its body.
+    result.body = item.body
+    return
   let entry = fold.timeline.entries[item.entry]
   result.facts = activityPresentation(entry).facts
   result.body = item.body

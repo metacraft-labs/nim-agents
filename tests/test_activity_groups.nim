@@ -552,3 +552,171 @@ suite "details and command traces":
     check fold.detailOf(fold.items[2].id).facts.anyIt(
       it.label == "File" and it.value == "src/upload/client.py")
     check fold.detailOf("no-such-item").facts.len == 0
+
+suite "test runs":
+  # A test run of the session is one item, `tikTestRun`, folded at its start
+  # time. It is never a member of a group and never hidden inside one, and it
+  # leaves every other line exactly as it would be without it: the same ids,
+  # kinds, members, counts, failures, running items and gaps.
+
+  proc events(): seq[JsonNode] =
+    ## Every kind of neighbour: a turn, a read group with a thought folded
+    ## in, a shell group with a failure and a running command, a repeat
+    ## group, an agent message, a gap, and an edit group.
+    @[instructs(1, "Fix the cache."),
+      read(10, "src/cache.py"), thinks(12, "and the routes"), read(14, "src/routes.py"),
+      read(16, "src/app.py"),
+      runs(20, "c1", "pytest -q"), finishes(22, "c1", 1),
+      runs(24, "c2", "pytest -q tests/test_cache.py"),
+      waits(30, "claude-stop-hook"), waits(32, "claude-stop-hook"),
+      says(34, "assistant: two tests fail"),
+      edits(400, "src/cache.py", 6, 2), edits(402, "src/routes.py", 1, 1)]
+
+  proc signature(fold: TimelineFold): seq[string] =
+    ## What a reader sees of every line that is not a test run: its id, kind,
+    ## text, counts, running item, gap and the ids of its items.
+    for node in fold.nodes:
+      if node.kind == tnItem and fold.item(node.first).kind == tikTestRun: continue
+      var line = node.id & " " & $node.kind & " " & fold.nodeText(node) & " count=" &
+        $node.count & " failed=" & $node.failed & " running=" & $node.running &
+        " runningItem=" & node.runningItem & " +" & $node.added & "-" & $node.removed &
+        " gap=" & $node.gapMs & " items="
+      for item in fold.itemsOf(node): line.add item.id & ","
+      result.add line
+
+  proc runNodes(fold: TimelineFold): seq[int] =
+    ## The indices of the test-run lines among the top-level nodes.
+    for i, node in fold.nodes:
+      if node.kind == tnItem and fold.item(node.first).kind == tikTestRun: result.add i
+
+  proc groupMembers(fold: TimelineFold): seq[TimelineItemKind] =
+    ## The kinds of every item inside a group.
+    for node in fold.nodes:
+      if node.kind == tnGroup:
+        for item in fold.itemsOf(node): result.add item.kind
+
+  test "wherever a run starts, it is no group's member and moves no other line":
+    let without = foldOf(events())
+    check without.signature.len == 7
+    # Before everything, inside each group's span, between a group and the
+    # next line, inside the repeat, at the gap, after everything, unknown.
+    for startMs in [0'i64, 11_000, 13_000, 15_000, 21_000, 23_000, 25_000, 31_000,
+                    34_000, 200_000, 401_000, 900_000, -1]:
+      var fold = foldOf(events())
+      let change = fold.applyTestRun("run-1", startMs, "Ran 6 tests on 2 platforms: 6 passed",
+                                     tisOk)
+      check change.changed
+      check change.newItems == 1
+      checkpoint "a run started at " & $startMs
+      check fold.signature == without.signature
+      check tikTestRun notin fold.groupMembers
+      check fold.runNodes.len == 1
+      check fold.nodes == nodesOf(fold.items)
+      check fold.itemCount == without.itemCount + 1
+
+  test "a run that starts while a group grows stands after the whole group":
+    var fold = foldOf(events())
+    discard fold.applyTestRun("run-1", 13_000, "Ran 2 tests on 1 platform: 2 passed", tisOk)
+    check fold.shape == @[
+      "turn Instruction sent",
+      "group Read 3 files [4]",
+      "item Ran 2 tests on 1 platform: 2 passed",
+      "group Ran 2 shell commands (1 failed) [2]",
+      "group Waiting for input (claude stop hook)" & Times & "2 [2]",
+      "item assistant: two tests fail",
+      "gap 6 min later",
+      "group Edited 2 files +7 " & Minus & "3 [2]"]
+    let at = fold.findNode(testRunItemId("run-1"))
+    check at == 2
+    check fold.nodes[at].id == "test-run:run-1"
+    let item = fold.item(fold.findItem("test-run:run-1"))
+    check item.kind == tikTestRun
+    check item.testRunId == "run-1"
+    check item.atMs == 13_000
+    check item.turn == 1
+    check item.state == tisOk
+    # One that starts before the gap stands before the gap line; one after
+    # it, after the line that follows the gap.
+    discard fold.applyTestRun("run-2", 200_000, "Ran 1 test on 1 platform: 1 failed", tisFailed)
+    discard fold.applyTestRun("run-3", 400_500, "Running 1 test on 1 platform", tisRunning)
+    check fold.shape[5 .. ^1] == @[
+      "item assistant: two tests fail",
+      "item Ran 1 test on 1 platform: 1 failed",
+      "gap 6 min later",
+      "group Edited 2 files +7 " & Minus & "3 [2]",
+      "item Running 1 test on 1 platform"]
+    check fold.nodes == nodesOf(fold.items)
+
+  test "runs of one place keep their start order; one with no start stands last":
+    var fold = foldOf(events()[0 .. 4])
+    discard fold.applyTestRun("late", -1, "late")
+    discard fold.applyTestRun("b", 17_000, "b")
+    discard fold.applyTestRun("a", 16_500, "a")
+    check fold.shape == @["turn Instruction sent", "group Read 3 files [4]",
+                          "item a", "item b", "item late"]
+
+  test "as events arrive, a run applied first never joins what grows around it":
+    var fold = initTimelineFold()
+    var without = initTimelineFold()
+    discard fold.applyTestRun("run-1", 15_000, "Running 2 tests on 1 platform", tisRunning)
+    check fold.shape == @["item Running 2 tests on 1 platform"]
+    for event in events():
+      discard fold.applyJson(Session, event)
+      discard without.applyJson(Session, event)
+      check fold.signature == without.signature
+      check tikTestRun notin fold.groupMembers
+      check fold.nodes == nodesOf(fold.items)
+      check fold.runNodes.len == 1
+    # It stands after the reads (the group spanning its start), before the
+    # shell commands that started after it.
+    check fold.nodes[fold.runNodes[0] - 1].id == "group:" & without.items[1].id
+    check fold.nodes[fold.runNodes[0] + 1].id == "group:" & without.items[5].id
+
+  test "a running command in a group is still named on its line beside a run":
+    var fold = foldOf(events()[0 .. 7])
+    let before = fold.nodes[^1]
+    check before.runningItem.len > 0
+    discard fold.applyTestRun("run-1", 23_000, "Running 1 test on 1 platform", tisRunning)
+    let group = fold.nodes[fold.findNode(before.id)]
+    check group.runningItem == before.runningItem
+    check group.running == 1
+    check group.count == 2
+
+  test "updating a run moves nothing else; the same words again are no change":
+    var fold = foldOf(events())
+    discard fold.applyTestRun("run-1", 21_000, "Running 6 tests on 2 platforms", tisRunning)
+    let nodes = fold.nodes
+    let revision = fold.revision
+    let change = fold.applyTestRun("run-1", 99_000,
+      "Ran 6 tests on 2 platforms: 4 passed, 1 failed, 1 skipped", tisFailed, body = "details")
+    check change.changed
+    check change.newItems == 0
+    check change.updated == @["test-run:run-1"]
+    check fold.revision == revision + 1
+    check fold.nodes == nodes                  # same place: its start is the first given
+    let item = fold.item(fold.findItem("test-run:run-1"))
+    check item.line == "Ran 6 tests on 2 platforms: 4 passed, 1 failed, 1 skipped"
+    check item.state == tisFailed
+    check item.atMs == 21_000
+    check fold.detailOf("test-run:run-1").body == "details"
+    check fold.testRuns.len == 1
+    let same = fold.applyTestRun("run-1", 21_000,
+      "Ran 6 tests on 2 platforms: 4 passed, 1 failed, 1 skipped", tisFailed, body = "details")
+    check not same.changed
+    check fold.revision == revision + 1
+    check not fold.applyTestRun("", 0, "no id").changed
+
+  test "a control: a run placed inside a group is caught by the signature":
+    var fold = foldOf(events())
+    discard fold.applyTestRun("run-1", 13_000, "r", tisOk)
+    let without = foldOf(events())
+    # The same items with the run moved between the group's first two reads:
+    # the closed form then splits the group, and the signature sees it.
+    var moved = fold.items
+    let run = moved[fold.findItem("test-run:run-1")]
+    moved.delete(fold.findItem("test-run:run-1"))
+    moved.insert(run, 2)
+    var shapes: seq[string]
+    for node in nodesOf(moved): shapes.add $node.kind & ":" & node.id
+    check ("group:" & without.items[1].id) notin shapes
+    check nodesOf(moved) != fold.nodes
