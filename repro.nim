@@ -153,14 +153,16 @@ const agentsJsBuildStems: seq[string] = @[
   "test_agent_harbor_domain", "test_agent_harbor_fleet_fold",
   "test_activity_groups", "test_review_record", "test_change_diff",
   "test_inbox", "test_instruction_composer", "test_result_commands",
-  "test_suggested_actions", "test_control_center",
+  "test_suggested_actions", "test_control_center", "test_test_runs",
+  "test_trace_links",
 ]
 const agentsJsTestStems: seq[string] = @[
   "test_activity", "test_activity_groups", "test_agent_harbor_domain",
   "test_agent_harbor_fleet_fold", "test_agents", "test_consumers",
   "test_session_load_client", "test_review_record", "test_change_diff",
   "test_inbox", "test_instruction_composer", "test_result_commands",
-  "test_suggested_actions", "test_control_center",
+  "test_suggested_actions", "test_control_center", "test_test_runs",
+  "test_trace_links",
 ]
 
 const agentsTestSpecs: seq[AgentsTestSpec] = @[
@@ -189,6 +191,10 @@ const agentsTestSpecs: seq[AgentsTestSpec] = @[
     binary: "build/test-bin/test_change_diff", serial: false),
   AgentsTestSpec(source: "tests/test_inbox.nim",
     binary: "build/test-bin/test_inbox", serial: false),
+  AgentsTestSpec(source: "tests/test_test_runs.nim",
+    binary: "build/test-bin/test_test_runs", serial: false),
+  AgentsTestSpec(source: "tests/test_trace_links.nim",
+    binary: "build/test-bin/test_trace_links", serial: false),
   AgentsTestSpec(source: "tests/test_instruction_composer.nim",
     binary: "build/test-bin/test_instruction_composer", serial: false),
   AgentsTestSpec(source: "tests/test_result_commands.nim",

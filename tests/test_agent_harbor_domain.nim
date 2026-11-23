@@ -6,7 +6,7 @@
 
 import std/[json, strutils, unittest]
 import nim_agents/agent_harbor/[fleet_records, session_directory, activity_digest,
-                                session_replay, initiatives]
+                                session_replay, initiatives, operator_actions]
 
 proc live(id: string; source = ""; status = fsRunning): FleetSession =
   FleetSession(id: id, status: status, rawStatus: $status,
@@ -508,3 +508,93 @@ suite "initiative state and the inbox":
     check not dir.resumeSession("w")
     check not dir.resumeSession("r")
     check not dir.resumeSession("nope")
+
+suite "test-run and trace actions":
+  # The four writes of the Tests panel and agent panes. Their routes are only
+  # proposed, so `routeOf` answers ("", ""); the ids travel in `params`.
+  let start = startTestRun("sess-1", @["pytest/a::t1", "cargo/b"],
+                           @["arch.x86_64+os.linux", "arch.aarch64+os.macos"],
+                           "failing", "certified", server = "ah-1")
+
+  test "starting a run: tests in choices, platforms and options in params":
+    check start.kind == oaStartTestRun
+    check $start.kind == "start-test-run"
+    check start.sessionId == "sess-1"
+    check start.choices == @["pytest/a::t1", "cargo/b"]
+    check start.params == @[("platform", "arch.x86_64+os.linux"),
+                            ("platform", "arch.aarch64+os.macos"),
+                            ("record", "failing"), ("reuse", "certified")]
+    check routeOf(start) == ("", "")
+    check $start == "start-test-run server=ah-1 session=sess-1 " &
+      "choices=pytest/a::t1,cargo/b platform=arch.x86_64+os.linux " &
+      "platform=arch.aarch64+os.macos record=failing reuse=certified"
+
+  test "the same start pressed twice is one target, in any order; another is not":
+    check targetOf(start) ==
+      "testrun:ah-1:sess-1:\"cargo/b\",\"pytest/a::t1\":" &
+      "\"arch.aarch64+os.macos\",\"arch.x86_64+os.linux\""
+    let again = startTestRun("sess-1", @["cargo/b", "pytest/a::t1"],
+                             @["arch.aarch64+os.macos", "arch.x86_64+os.linux"],
+                             "failing", "certified", server = "ah-1")
+    check targetOf(again) == targetOf(start)
+    # Recording the same tests on the same platforms waits for the run.
+    check targetOf(startTestRun("sess-1", @["pytest/a::t1", "cargo/b"],
+      @["arch.x86_64+os.linux", "arch.aarch64+os.macos"], "all", "never",
+      server = "ah-1")) == targetOf(start)
+    # Another test, another platform, another session or server: its own.
+    check targetOf(startTestRun("sess-1", @["pytest/a::t1"],
+      @["arch.x86_64+os.linux", "arch.aarch64+os.macos"], "failing", "certified",
+      server = "ah-1")) != targetOf(start)
+    check targetOf(startTestRun("sess-1", @["pytest/a::t1", "cargo/b"],
+      @["arch.x86_64+os.linux"], "failing", "certified", server = "ah-1")) != targetOf(start)
+    check targetOf(startTestRun("sess-2", @["pytest/a::t1", "cargo/b"],
+      @["arch.x86_64+os.linux", "arch.aarch64+os.macos"], "failing", "certified",
+      server = "ah-1")) != targetOf(start)
+    check targetOf(startTestRun("sess-1", @["pytest/a::t1", "cargo/b"],
+      @["arch.x86_64+os.linux", "arch.aarch64+os.macos"], "failing", "certified",
+      server = "ah-2")) != targetOf(start)
+    # An id holding the separator is not two ids: two different requests
+    # never share a target.
+    check targetOf(startTestRun("sess-1", @["pytest/t[a,b]"], @["os.linux"], "none",
+                                "certified", server = "ah-1")) !=
+      targetOf(startTestRun("sess-1", @["pytest/t[a", "b]"], @["os.linux"], "none",
+                            "certified", server = "ah-1"))
+    check targetOf(startTestRun("sess-1", @["a"], @["os.linux,os.macos"], "none",
+                                "certified", server = "ah-1")) !=
+      targetOf(startTestRun("sess-1", @["a"], @["os.linux", "os.macos"], "none",
+                            "certified", server = "ah-1"))
+    # Never the target of another kind of action on the same session.
+    check targetOf(start) != targetOf(stopSession("sess-1", server = "ah-1"))
+
+  test "cancelling a run: one target per run":
+    let cancel = cancelTestRun("run-9", server = "ah-1")
+    check cancel.kind == oaCancelTestRun
+    check $cancel.kind == "cancel-test-run"
+    check routeOf(cancel) == ("", "")
+    check targetOf(cancel) == "cancel:ah-1:run-9"
+    check targetOf(cancelTestRun("run-9", sessionId = "sess-1", server = "ah-1")) ==
+      targetOf(cancel)
+    check targetOf(cancelTestRun("run-10", server = "ah-1")) != targetOf(cancel)
+    check $cancel == "cancel-test-run server=ah-1 test-run=run-9"
+
+  test "opening and downloading a trace: one target per trace, apart from each other":
+    let opened = openTraceReplay("tr-1", sessionId = "sess-1", server = "ah-1")
+    let download = downloadTrace("tr-1", server = "ah-1")
+    check opened.kind == oaOpenTraceReplay
+    check $opened.kind == "open-trace-replay"
+    check download.kind == oaDownloadTrace
+    check $download.kind == "download-trace"
+    check routeOf(opened) == ("", "")
+    check routeOf(download) == ("", "")
+    check targetOf(opened) == "replay:ah-1:tr-1"
+    check targetOf(openTraceReplay("tr-1", server = "ah-1")) == targetOf(opened)
+    check targetOf(download) == "download:ah-1:tr-1"
+    check targetOf(download) != targetOf(opened)
+    check targetOf(openTraceReplay("tr-2", server = "ah-1")) != targetOf(opened)
+    check $opened == "open-trace-replay server=ah-1 session=sess-1 trace=tr-1"
+    check $download == "download-trace server=ah-1 trace=tr-1"
+
+  test "the four kinds come after every earlier kind, which keep their names":
+    check ord(oaStartTestRun) == ord(oaDecideSuggestion) + 1
+    check ord(oaDownloadTrace) == ord(oaDecideSuggestion) + 4
+    check $oaDecideSuggestion == "decide-suggestion"

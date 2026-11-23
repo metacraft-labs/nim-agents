@@ -28,6 +28,8 @@ build-native:
     nim c {{paths}} tests/test_result_commands.nim
     nim c {{paths}} tests/test_suggested_actions.nim
     nim c {{paths}} tests/test_control_center.nim
+    nim c {{paths}} tests/test_test_runs.nim
+    nim c {{paths}} tests/test_trace_links.nim
 
 build-js:
     nim js {{paths}} tests/test_agents.nim
@@ -43,6 +45,8 @@ build-js:
     nim js {{paths}} tests/test_result_commands.nim
     nim js {{paths}} tests/test_suggested_actions.nim
     nim js {{paths}} tests/test_control_center.nim
+    nim js {{paths}} tests/test_test_runs.nim
+    nim js {{paths}} tests/test_trace_links.nim
 
 # Test: run the native and JS test corpus through `repro test` (one build edge
 # and one execute edge per module; the JS modules run under node). CI runs the
@@ -66,6 +70,8 @@ test-native:
     nim c -r {{paths}} tests/test_review_record.nim
     nim c -r {{paths}} tests/test_change_diff.nim
     nim c -r {{paths}} tests/test_inbox.nim
+    nim c -r {{paths}} tests/test_test_runs.nim
+    nim c -r {{paths}} tests/test_trace_links.nim
     nim c -r {{paths}} tests/test_acp_launch_prefix.nim
     nim c -r {{paths}} tests/test_harbor_lifecycle_threads.nim
     nim c -r {{paths}} tests/test_harbor_rest_native.nim
@@ -89,6 +95,8 @@ test-js:
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_review_record.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_change_diff.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_inbox.nim
+    bash tools/nim-js-test-gate.sh {{paths}} tests/test_test_runs.nim
+    bash tools/nim-js-test-gate.sh {{paths}} tests/test_trace_links.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_agents.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_consumers.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_session_load_client.nim
@@ -110,6 +118,8 @@ lint-nim:
     nim check {{paths}} tests/test_review_record.nim
     nim check {{paths}} tests/test_change_diff.nim
     nim check {{paths}} tests/test_inbox.nim
+    nim check {{paths}} tests/test_test_runs.nim
+    nim check {{paths}} tests/test_trace_links.nim
     nim check {{paths}} tests/test_instruction_composer.nim
     nim check {{paths}} tests/test_result_commands.nim
     nim check {{paths}} tests/test_suggested_actions.nim

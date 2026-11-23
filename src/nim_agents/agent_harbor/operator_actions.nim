@@ -5,6 +5,13 @@
 ## no transport (INV-D-09, INV-D-15, INV-P3-12 … INV-P3-19; INV-C-20 …
 ## INV-C-23, INV-P2-30, -32, -34, -42, -61).
 ##
+## **Test runs and traces.** The Tests panel and agent panes add four writes:
+## run or record tests on platforms, cancel a test run, open a trace in a
+## remote replay, download a trace (INV-D-17, INV-D-23, INV-D-25). Their
+## routes are only proposed, so `routeOf` answers ("", ""); a test run's and
+## a trace's ids travel in `params` (`test-run`, `trace`), so no field is
+## added for them.
+##
 ## A view never talks to a server: it builds an `OperatorAction` and hands
 ## it to its data source, which sends it, answers it from a script, or says
 ## it cannot. `routeOf` names the REST route an action goes to where Agent
@@ -17,7 +24,7 @@
 ##
 ## Signal-free and app-agnostic; identical on the C and JS targets.
 
-import std/strutils
+import std/[algorithm, sequtils, strutils]
 
 type
   Secret* = object
@@ -44,6 +51,10 @@ type
     oaStartInitiative = "start-initiative"     ## a new initiative and its plan
     oaStopSession = "stop-session"             ## stop the turn a session runs
     oaDecideSuggestion = "decide-suggestion"   ## approve or dismiss an agent's suggested UI actions
+    oaStartTestRun = "start-test-run"          ## run (or record) tests on platforms
+    oaCancelTestRun = "cancel-test-run"        ## cancel a test run's active platform runs
+    oaOpenTraceReplay = "open-trace-replay"    ## open a trace in a remote replay
+    oaDownloadTrace = "download-trace"         ## download a trace
 
   ApprovalScope* = enum
     ## What a sudo or network approval asks for; each has its own route.
@@ -196,6 +207,50 @@ proc decideSuggestion*(sessionId, requestId, decision: string;
   OperatorAction(kind: oaDecideSuggestion, sessionId: sessionId, requestId: requestId,
                  decision: decision, choices: approvedIds, server: server)
 
+proc startTestRun*(sessionId: string; tests, platforms: seq[string];
+                   record, reuse: string; server = ""): OperatorAction =
+  ## A test run over the session's change: the test ids (`<runner>/<id>`) in
+  ## `choices`, each platform as `("platform", <features joined by "+">)` in
+  ## `params` (`os.linux+arch.x86_64`), then `("record", …)` (`none`,
+  ## `failing`, `all`) and `("reuse", …)` (`certified`, `never`). Proposed
+  ## route: `POST /api/v1/test-runs`.
+  var params: seq[(string, string)]
+  for platform in platforms: params.add ("platform", platform)
+  params.add ("record", record)
+  params.add ("reuse", reuse)
+  OperatorAction(kind: oaStartTestRun, sessionId: sessionId, choices: tests,
+                 params: params, server: server)
+
+proc cancelTestRun*(testRunId: string; sessionId = "", server = ""): OperatorAction =
+  ## Cancels every platform run of the test run still active, as
+  ## `("test-run", <id>)` in `params`. Proposed route:
+  ## `DELETE /api/v1/test-runs/{id}`.
+  OperatorAction(kind: oaCancelTestRun, sessionId: sessionId,
+                 params: @[("test-run", testRunId)], server: server)
+
+proc openTraceReplay*(traceId: string; sessionId = "", server = ""): OperatorAction =
+  ## Opens the trace in a replay started near it, as `("trace", <id>)` in
+  ## `params`. Agent Harbor names no route for it yet.
+  OperatorAction(kind: oaOpenTraceReplay, sessionId: sessionId,
+                 params: @[("trace", traceId)], server: server)
+
+proc downloadTrace*(traceId: string; sessionId = "", server = ""): OperatorAction =
+  ## Downloads the trace, as `("trace", <id>)` in `params`. Agent Harbor
+  ## names no route for it yet.
+  OperatorAction(kind: oaDownloadTrace, sessionId: sessionId,
+                 params: @[("trace", traceId)], server: server)
+
+proc paramValues(action: OperatorAction; name: string): seq[string] =
+  ## Every value of the parameter `name`, in order.
+  for (key, value) in action.params:
+    if key == name: result.add value
+
+proc paramOf(action: OperatorAction; name: string): string =
+  ## The first value of the parameter `name`, or "".
+  for (key, value) in action.params:
+    if key == name: return value
+  ""
+
 const ViewingHeartbeatMs* = 20_000
   ## How often a visible item's page repeats `markViewing`.
 
@@ -228,6 +283,10 @@ proc routeOf*(action: OperatorAction): tuple[verb, path: string] =
   # Agent Harbor documents the request (`suggest_actions`) but no route for
   # the front-end's answer yet: proposed only.
   of oaDecideSuggestion: ("", "")
+  # The test-run writes are only proposed: `POST /api/v1/test-runs` (start)
+  # and `DELETE /api/v1/test-runs/{id}` (cancel). Opening a trace in a remote
+  # replay and downloading one have no route named yet.
+  of oaStartTestRun, oaCancelTestRun, oaOpenTraceReplay, oaDownloadTrace: ("", "")
 
 proc targetOf*(action: OperatorAction): string =
   ## What the action acts on; one action per target is in flight at a time.
@@ -245,6 +304,19 @@ proc targetOf*(action: OperatorAction): string =
   of oaLaunchTask: "launch:" & action.server & ":" & action.sessionId & ":" & action.text
   of oaStartInitiative:
     "initiative:" & action.server & ":" & action.sessionId & ":" & action.text
+  # The same request pressed twice is one action: the tests and platforms
+  # are keyed as sets (sorted), so their order does not make a second one.
+  # A run and a record of the same tests on the same platforms share it too:
+  # one start per tests-and-platforms is in flight at a time.
+  # Each id is quoted (`escape`), so an id holding the separator cannot make
+  # two different requests one target (`["a,b"]` is not `["a", "b"]`).
+  of oaStartTestRun:
+    "testrun:" & action.server & ":" & action.sessionId & ":" &
+      action.choices.sorted.mapIt(it.escape).join(",") & ":" &
+      action.paramValues("platform").sorted.mapIt(it.escape).join(",")
+  of oaCancelTestRun: "cancel:" & action.server & ":" & action.paramOf("test-run")
+  of oaOpenTraceReplay: "replay:" & action.server & ":" & action.paramOf("trace")
+  of oaDownloadTrace: "download:" & action.server & ":" & action.paramOf("trace")
   else:
     if action.itemId.len > 0: "item:" & action.server & ":" & action.itemId
     else: "request:" & action.server & ":" & action.sessionId & ":" & action.requestId
