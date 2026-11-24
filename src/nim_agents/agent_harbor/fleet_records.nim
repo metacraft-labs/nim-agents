@@ -309,7 +309,7 @@ proc fleetSessionFromJson*(node: JsonNode): FleetSession =
     agentSoftware: software.str("software"),
     agentVersion: software.str("version"),
     model: agentNode.str("model"),
-    agentCount: max(1, agentNode.num("count").int),
+    agentCount: max(1, agentNode.fieldInt("count")),
     runtime: node.child("runtime").str("type"),
     host: workspace.str("host"),
     repoUrl: vcs.str("repo_url"),
@@ -421,12 +421,12 @@ proc fleetSnapshotFromJson*(node: JsonNode; capturedAtMs: int64;
   if not items.isNil and items.kind == JArray:
     for item in items:
       result.sessions.add(fleetSessionFromJson(item))
-  result.total = max(result.sessions.len, node.num("total").int)
+  result.total = max(result.sessions.len, node.fieldInt("total"))
 
 proc sessionEventHistoryFromJson*(sessionId: string;
                                   node: JsonNode): SessionEventHistory =
   result = SessionEventHistory(sessionId: sessionId,
-                               totalCount: node.num("total_count").int,
+                               totalCount: node.fieldInt("total_count"),
                                hasMore: node.flag("has_more"))
   let events = node.child("events")
   if not events.isNil and events.kind == JArray:

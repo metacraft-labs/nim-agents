@@ -24,6 +24,7 @@
 import std/[json, strutils]
 import nim_acp/types
 import nim_agent_harbor/types
+from ./agent_harbor/activity_words import wireInt
 
 type
   AgentConnectionState* = enum
@@ -113,16 +114,16 @@ proc stateFromStatus(status: string): AgentConnectionState =
   else: acsStreaming
 
 proc lineFromRaw(raw: JsonNode): int =
-  raw{"line"}.getInt(raw{"line_start"}.getInt(raw{"start_line"}.getInt(0)))
+  raw{"line"}.wireInt(raw{"line_start"}.wireInt(raw{"start_line"}.wireInt(0)))
 
 proc jsonArrayStrings(node: JsonNode; field: string): seq[string] =
   for entry in node{field}.items:
     result.add entry{"content"}.getStr(entry.getStr(""))
 
 proc progressFromRaw(raw: JsonNode): tuple[done: int; total: int] =
-  result.done = raw{"completed"}.getInt(raw{"completedMilestones"}.getInt(
-    raw{"done"}.getInt(0)))
-  result.total = raw{"total"}.getInt(raw{"totalMilestones"}.getInt(0))
+  result.done = raw{"completed"}.wireInt(raw{"completedMilestones"}.wireInt(
+    raw{"done"}.wireInt(0)))
+  result.total = raw{"total"}.wireInt(raw{"totalMilestones"}.wireInt(0))
 
 proc isPrivateKey*(key: string): bool =
   ## Whether a field or variable named `key` holds a value that must not cross
@@ -272,8 +273,8 @@ proc harborEventToAgentEvent*(sessionId: string;
     result.text = event.raw{"responseSummary"}.getStr(event.message)
     let usage = event.raw{"usage"}
     if usage != nil and usage.kind == JObject:
-      result.inputTokens = usage{"input_tokens"}.getInt(usage{"inputTokens"}.getInt(-1))
-      result.outputTokens = usage{"output_tokens"}.getInt(usage{"outputTokens"}.getInt(-1))
+      result.inputTokens = usage{"input_tokens"}.wireInt(usage{"inputTokens"}.wireInt(-1))
+      result.outputTokens = usage{"output_tokens"}.wireInt(usage{"outputTokens"}.wireInt(-1))
       result.hasUsage = result.inputTokens >= 0 or result.outputTokens >= 0
       result.usageSource = usage{"source"}.getStr("")
   of hekSubAgent:
@@ -427,14 +428,14 @@ proc acpUpdateToAgentEvent*(sessionId: string;
       result.kind = aekFileEdit
       result.filePath = rawUpdate{"file_path"}.getStr(rawUpdate{"path"}.getStr(""))
       result.line = rawUpdate.lineFromRaw()
-      result.linesAdded = rawUpdate{"lines_added"}.getInt(0)
-      result.linesRemoved = rawUpdate{"lines_removed"}.getInt(0)
+      result.linesAdded = rawUpdate{"lines_added"}.wireInt(0)
+      result.linesRemoved = rawUpdate{"lines_removed"}.wireInt(0)
     of "diff":
       result.kind = aekDiff
       result.filePath = rawUpdate{"file_path"}.getStr(rawUpdate{"path"}.getStr(""))
       result.line = rawUpdate.lineFromRaw()
-      result.linesAdded = rawUpdate{"lines_added"}.getInt(0)
-      result.linesRemoved = rawUpdate{"lines_removed"}.getInt(0)
+      result.linesAdded = rawUpdate{"lines_added"}.wireInt(0)
+      result.linesRemoved = rawUpdate{"lines_removed"}.wireInt(0)
       result.diff = rawUpdate{"diff"}.getStr(rawUpdate{"patch"}.getStr(""))
     of "milestone", "milestone_progress":
       let progress = progressFromRaw(rawUpdate)
@@ -527,8 +528,8 @@ proc agentEventFromJson*(node: JsonNode): AgentEvent =
     model: node{"model"}.getStr(""),
     usageSource: node{"usageSource"}.getStr(""),
     hasUsage: node{"hasUsage"}.getBool(false),
-    inputTokens: node{"inputTokens"}.getInt(0),
-    outputTokens: node{"outputTokens"}.getInt(0),
+    inputTokens: node{"inputTokens"}.wireInt(0),
+    outputTokens: node{"outputTokens"}.wireInt(0),
     question: node{"question"}.getStr(""),
     sessionId: node{"sessionId"}.getStr(""),
     stopReason: parseStopReason(node{"stopReason"}.getStr("end_turn")),
@@ -539,14 +540,14 @@ proc agentEventFromJson*(node: JsonNode): AgentEvent =
     toolCallId: node{"toolCallId"}.getStr(""),
     toolName: node{"toolName"}.getStr(""),
     filePath: node{"filePath"}.getStr(""),
-    line: node{"line"}.getInt(0),
-    linesAdded: node{"linesAdded"}.getInt(0),
-    linesRemoved: node{"linesRemoved"}.getInt(0),
+    line: node{"line"}.wireInt(0),
+    linesAdded: node{"linesAdded"}.wireInt(0),
+    linesRemoved: node{"linesRemoved"}.wireInt(0),
     diff: node{"diff"}.getStr(""),
     reviewSeverity: node{"reviewSeverity"}.getStr(""),
     reviewCategory: node{"reviewCategory"}.getStr(""),
-    milestoneCompleted: node{"milestoneCompleted"}.getInt(0),
-    milestoneTotal: node{"milestoneTotal"}.getInt(0),
+    milestoneCompleted: node{"milestoneCompleted"}.wireInt(0),
+    milestoneTotal: node{"milestoneTotal"}.wireInt(0),
     workspacePath: node{"workspacePath"}.getStr(""),
     workingCopyMode: node{"workingCopyMode"}.getStr(""),
     raw: node)

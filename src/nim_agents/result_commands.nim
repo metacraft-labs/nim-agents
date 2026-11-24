@@ -34,6 +34,7 @@
 ##   (`LauncherAbilities`, `unroutedAbilities`).
 
 import std/[json, strutils]
+from ./agent_harbor/activity_words import wireInt
 
 type
   ResultKind* = enum
@@ -240,7 +241,7 @@ proc parseResult*(node: JsonNode; source: string; trusted: bool): ResultRow =
                 of "spec": rkSpec
                 else: (if result.insert.len > 0: rkSuggestion else: rkSession)
   if node.kind == JObject and node.hasKey("html_height") and node["html_height"].kind == JInt:
-    result.htmlHeight = node["html_height"].getInt
+    result.htmlHeight = node["html_height"].wireInt
 
 proc isAvailableOn*(cmd: InputCommand; surface: string): bool =
   ## A command lists the surfaces that may offer it; none listed: every one.

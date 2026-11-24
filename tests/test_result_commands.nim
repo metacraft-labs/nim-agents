@@ -150,6 +150,10 @@ suite "Agent Harbor's discovery":
     check r.url == "agent-harbor://task/ses-8f2c"
     check r.htmlHeight == 140
     check r.trusted
+    # An integer past what `int` holds under JS (2^31-1) is held at the bound
+    # rather than raising std/json's RangeDefect there.
+    check parseResult(parseJson("""{"id": "x", "html_height": 10000000000}"""),
+      "builtin", trusted = true).htmlHeight == int(high(int32))
 
 suite "a search over every provider":
   test "groups keep the providers' order, whatever answers first":

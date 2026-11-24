@@ -7,6 +7,7 @@ import nim_acp
 import nim_agent_harbor
 import nim_everywhere
 import ./agent_events
+from ./agent_harbor/activity_words import wireInt
 
 export agent_events
 
@@ -1042,8 +1043,8 @@ proc fileStatFromJson(node: JsonNode): AgentFileStat =
     path: node{"path"}.getStr(""),
     oldPath: node{"oldPath"}.getStr(node{"old_path"}.getStr("")),
     status: node{"status"}.getStr(""),
-    linesAdded: node{"linesAdded"}.getInt(node{"lines_added"}.getInt(0)),
-    linesRemoved: node{"linesRemoved"}.getInt(node{"lines_removed"}.getInt(0)),
+    linesAdded: node{"linesAdded"}.wireInt(node{"lines_added"}.wireInt(0)),
+    linesRemoved: node{"linesRemoved"}.wireInt(node{"lines_removed"}.wireInt(0)),
     binary: node{"binary"}.getBool(false),
     sizeBytes: node{"sizeBytes"}.getBiggestInt(node{"size_bytes"}.getBiggestInt(0)),
     contentType: node{"contentType"}.getStr(node{"content_type"}.getStr("")),
@@ -1075,10 +1076,10 @@ proc changedFiles*(client: AgentClient; session: AgentSession; page = 0;
       newJArray()
   for item in itemsNode.items:
     result.items.add fileStatFromJson(item)
-  result.total = node{"total"}.getInt(result.items.len)
-  result.page = node{"page"}.getInt(0)
-  result.perPage = node{"perPage"}.getInt(node{"per_page"}.getInt(0))
-  result.nextPage = node{"nextPage"}.getInt(node{"next_page"}.getInt(0))
+  result.total = node{"total"}.wireInt(result.items.len)
+  result.page = node{"page"}.wireInt(0)
+  result.perPage = node{"perPage"}.wireInt(node{"per_page"}.wireInt(0))
+  result.nextPage = node{"nextPage"}.wireInt(node{"next_page"}.wireInt(0))
 
 proc fileContent*(client: AgentClient; session: AgentSession; path: string;
     range = ""; snapshotId = ""): AgentFileContent =
@@ -1114,10 +1115,10 @@ proc fileDiff*(client: AgentClient; session: AgentSession; path: string;
     oldPath: node{"oldPath"}.getStr(node{"old_path"}.getStr("")),
     status: node{"status"}.getStr(""),
     diff: node{"diff"}.getStr(""),
-    linesAdded: node{"linesAdded"}.getInt(node{"lines_added"}.getInt(0)),
-    linesRemoved: node{"linesRemoved"}.getInt(node{"lines_removed"}.getInt(0)),
+    linesAdded: node{"linesAdded"}.wireInt(node{"lines_added"}.wireInt(0)),
+    linesRemoved: node{"linesRemoved"}.wireInt(node{"lines_removed"}.wireInt(0)),
     binary: node{"binary"}.getBool(false),
-    contextLines: node{"contextLines"}.getInt(node{"context_lines"}.getInt(0)),
+    contextLines: node{"contextLines"}.wireInt(node{"context_lines"}.wireInt(0)),
     raw: node)
 
 proc sessionInfo*(client: AgentClient; session: AgentSession): AgentSessionInfo =
@@ -1186,9 +1187,9 @@ proc milestoneProgress*(client: AgentClient;
       title: item{"title"}.getStr(""),
       currentMilestone: item{"currentMilestone"}.getStr(""),
       status: item{"status"}.getStr(""),
-      totalMilestones: summary{"totalMilestones"}.getInt(0),
-      completedMilestones: summary{"completedMilestones"}.getInt(0),
-      progressPercent: summary{"progressPercent"}.getInt(0),
+      totalMilestones: summary{"totalMilestones"}.wireInt(0),
+      completedMilestones: summary{"completedMilestones"}.wireInt(0),
+      progressPercent: summary{"progressPercent"}.wireInt(0),
       raw: item)
 
 proc eventHistoryPage*(client: AgentClient; session: AgentSession;

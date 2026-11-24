@@ -306,8 +306,8 @@ proc commandTraceFromJson*(node: JsonNode): CommandTrace =
   let processes = node.fieldChild("processes")
   if not processes.isNil and processes.kind == JArray:
     for p in processes:
-      var process = TracedProcess(pid: p.fieldNum("pid").int,
-                                  ppid: p.fieldNum("ppid").int,
+      var process = TracedProcess(pid: p.fieldInt("pid"),
+                                  ppid: p.fieldInt("ppid"),
                                   cwd: p.fieldStr("cwd"), exe: p.fieldStr("exe"),
                                   startMs: p.fieldNum("start_ms"),
                                   stdout: p.fieldStr("stdout"),
@@ -321,7 +321,7 @@ proc commandTraceFromJson*(node: JsonNode): CommandTrace =
                       else: ended.getBiggestInt.int64
       let exit = p.fieldChild("exit_code")
       if not exit.isNil and exit.kind == JInt:
-        process.exitCode = exit.getInt
+        process.exitCode = exit.wireInt
         process.hasExit = true
       result.processes.add process
   result.rawOutput = node.fieldStr("raw_output")
@@ -510,7 +510,7 @@ proc refreshItem(fold: var TimelineFold; i: int; event: AgentEvent): bool =
     let raw = event.raw
     let exit = raw.fieldChild("exit_code")
     if not exit.isNil and exit.kind == JInt:
-      item.exitCode = exit.getInt
+      item.exitCode = exit.wireInt
       item.hasExit = true
     let trace = raw.fieldChild("command_trace")
     if not trace.isNil and trace.kind == JObject:

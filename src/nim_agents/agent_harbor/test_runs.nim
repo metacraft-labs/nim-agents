@@ -321,22 +321,6 @@ proc runnerOf*(testId: string): string =
 # Parsing
 # ---------------------------------------------------------------------------
 
-proc fieldInt(node: JsonNode; key: string): int =
-  ## An integer field held to the 32-bit range every target's `int` holds; 0
-  ## when absent or not a number. `fieldNum(key).int` raises a RangeDefect
-  ## under JS on a hostile value (`1e300`), and its float-to-int conversion is
-  ## undefined in C past the int64 range, so a wire number is clamped here
-  ## before it is converted.
-  let value = node.fieldChild(key)
-  if value.isNil: return 0
-  case value.kind
-  of JInt: int(clamp(value.getBiggestInt, int64(low(int32)), int64(high(int32))))
-  of JFloat:
-    let f = value.getFloat
-    if f != f: 0   # NaN
-    else: int(clamp(f, float(low(int32)), float(high(int32))))
-  else: 0
-
 proc firstStr(node: JsonNode; keys: openArray[string]): string =
   for key in keys:
     let value = node.fieldStr(key)

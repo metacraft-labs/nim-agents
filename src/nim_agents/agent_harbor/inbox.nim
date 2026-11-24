@@ -341,8 +341,6 @@ proc holderText*(item: InboxItem): string =
 
 proc str(node: JsonNode; key: string): string = node.fieldStr(key)
 
-proc int0(node: JsonNode; key: string): int = node.fieldNum(key).int
-
 proc arr(node: JsonNode; key: string): seq[JsonNode] =
   let v = node.fieldChild(key)
   if not v.isNil and v.kind == JArray:
@@ -389,7 +387,7 @@ proc inboxItemFromJson*(node: JsonNode): InboxItem =
                           handle: if not handle.isNil and handle.kind == JString: handle.getStr
                                   else: handle.str("display")),
     priority: parsePriority(node.str("priority")),
-    position: node.int0("position"), explanation: node.str("explanation"),
+    position: node.fieldInt("position"), explanation: node.str("explanation"),
     enteredAtMs: parseIsoMs(node.str("enteredAt")),
     warmth: cacheWarmthFromJson(node.fieldChild("cacheWarmth")),
     question: node.str("question"))
@@ -586,8 +584,8 @@ proc inboxItemDetailFromJson*(node: JsonNode): InboxItemDetail =
     result.feedback = FeedbackRequest(id: fb.str("id"), taskId: fb.str("taskId"),
                                       prompt: fb.str("prompt"), context: fb.str("context"),
                                       options: optionsFromJson(fb.arr("options")),
-                                      minLength: fb.int0("minLength"),
-                                      maxLength: fb.int0("maxLength"),
+                                      minLength: fb.fieldInt("minLength"),
+                                      maxLength: fb.fieldInt("maxLength"),
                                       expiresAtMs: parseIsoMs(fb.str("expiresAt")))
     result.feedback.feedbackType = case fb.str("type")
       of "options": ftOptions

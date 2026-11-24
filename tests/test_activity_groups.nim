@@ -530,6 +530,30 @@ suite "details and command traces":
     check item.state == tisFailed
     check fold.detailOf(item.id).hasTrace
 
+  test "a process id past every target's int reads as the bound, never as a defect":
+    # `fieldNum(key).int` raised a RangeDefect under JS on `1e300`; a trace is
+    # read leniently, so the id is held at the 32-bit bound instead.
+    let trace = commandTraceFromJson(%*{"processes": [
+      {"pid": 1e300, "ppid": -1e300, "argv": ["a"]},
+      {"pid": -1e300, "ppid": 1e300, "argv": ["b"]}]})
+    check trace.processes.len == 2
+    check trace.processes[0].pid == int(high(int32))
+    check trace.processes[0].ppid == int(low(int32))
+    check trace.processes[1].pid == int(low(int32))
+    check trace.processes[1].ppid == int(high(int32))
+
+  test "an exit code past every target's int reads as the bound, never as a defect":
+    # std/json's `getInt` raises a RangeDefect under JS on 10000000000.
+    var finished = finishes(3, "c1", 1)
+    finished["exit_code"] = parseJson("10000000000")
+    var trace = %*{"processes": [{"pid": 1, "argv": ["a"]}]}
+    trace["processes"][0]["exit_code"] = parseJson("-10000000000")
+    finished["command_trace"] = trace
+    var fold = foldOf([runs(1, "c1", "make")])
+    discard fold.applyJson(Session, finished)
+    check fold.items[0].exitCode == int(high(int32)) and fold.items[0].hasExit
+    check fold.items[0].trace.get.processes[0].exitCode == int(low(int32))
+
   test "a command without a trace has none":
     let fold = foldOf([runs(1, "c1", "make"), finishes(2, "c1", 0, "ok")])
     check fold.items[0].trace.isNone

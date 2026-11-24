@@ -12,6 +12,81 @@ proc live(id: string; source = ""; status = fsRunning): FleetSession =
   FleetSession(id: id, status: status, rawStatus: $status,
                awaitingInput: source.len > 0, awaitingInputSource: source)
 
+suite "wire numbers past every target's int":
+  # `int` is 32 bits under JS: `fieldNum(key).int` raises a RangeDefect there on
+  # `1e300`, and std/json's `getInt` on an integer such as 10000000000. The
+  # readers hold such a number at the bound instead; NaN reads as 0.
+  let hi = int(high(int32))
+  let lo = int(low(int32))
+
+  test "the readers in activity_words":
+    let n = %*{"big": 1e300, "small": -1e300, "edge": 9.3e18,
+               "wide": 10000000000.0, "text": "7", "frac": -2.9,
+               "p63": 9.223372036854775808e18, "m63": -9.223372036854775808e18,
+               "below63": 9.2233720368547748e18}
+    # std/json's `%` writes NaN and the infinities as strings, so these
+    # JFloat nodes are built directly to reach the float branch.
+    n["nan"] = newJFloat(NaN)
+    n["inf"] = newJFloat(Inf)
+    n["ninf"] = newJFloat(NegInf)
+    n["int"] = parseJson("10000000000")
+    n["negint"] = parseJson("-10000000000")
+    check n["nan"].kind == JFloat and n["inf"].kind == JFloat
+    check n.fieldNum("p63") == high(int64)
+    check n.fieldNum("m63") == low(int64)
+    check n.fieldNum("below63") == 9223372036854774784'i64   # 2^63 - 1024
+    check n.fieldNum("inf") == high(int64)
+    check n.fieldNum("ninf") == low(int64)
+    check n.fieldInt("inf") == hi
+    check n.fieldInt("ninf") == lo
+    check n.fieldInt("p63") == hi
+    check n.fieldInt("m63") == lo
+    check n.fieldInt("big") == hi
+    check n.fieldInt("small") == lo
+    check n.fieldInt("nan") == 0
+    check n.fieldInt("int") == hi
+    check n.fieldInt("negint") == lo
+    check n.fieldInt("text") == 0
+    check n.fieldInt("absent") == 0
+    check n.fieldInt("frac") == -2
+    check n.fieldNum("big") == high(int64)
+    check n.fieldNum("small") == low(int64)
+    check n.fieldNum("edge") == high(int64)
+    check n.fieldNum("nan") == 0
+    check n.fieldNum("wide") == 10000000000'i64
+    check n.fieldNum("int") == 10000000000'i64
+    check n["int"].wireInt == hi
+    check n["negint"].wireInt == lo
+    check n["big"].wireInt(-1) == -1     # not an integer: the default
+    check JsonNode(nil).wireInt(5) == 5
+    check parseJson("42").wireInt == 42
+
+  test "a fleet listing, a session and an event history":
+    let snapshot = fleetSnapshotFromJson(%*{"total": 1e300,
+      "items": [{"id": "s", "agent": {"count": 1e300}}]}, 0)
+    check snapshot.total == hi
+    check snapshot.sessions[0].agentCount == hi
+    check fleetSessionFromJson(%*{"id": "s", "agent": {"count": -1e300}}).agentCount == 1
+    check sessionEventHistoryFromJson("s", %*{"total_count": -1e300}).totalCount == lo
+    check sessionEventHistoryFromJson("s",
+      parseJson("""{"total_count": 10000000000}""")).totalCount == hi
+
+  test "a milestone file's progress":
+    let p = milestoneFileProgressFromJson(%*{"path": "m.org",
+      "milestones": [{"id": "M1", "deliverables": {"done": 1e300, "total": -1e300},
+                      "verifications": {"passing": 1e300, "failing": -1e300,
+                                        "pending": 1e300}}],
+      "summary": {"totalMilestones": 1e300, "completedMilestones": -1e300,
+                  "progressPercent": 1e300}})
+    check p.milestones[0].deliverables.done == hi
+    check p.milestones[0].deliverables.total == lo
+    check p.milestones[0].verifications.passing == hi
+    check p.milestones[0].verifications.failing == lo
+    check p.milestones[0].verifications.pending == hi
+    check p.summary.totalMilestones == hi
+    check p.summary.completedMilestones == lo
+    check p.summary.progressPercent == hi
+
 suite "effective status":
   test "every wait reads needs input under the WebUI's policy":
     check live("a", "claude-stop-hook").attentionOf(espNeedsInputWins) == saNeedsInput

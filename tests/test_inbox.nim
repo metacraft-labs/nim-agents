@@ -320,6 +320,22 @@ suite "an item's page":
     check d.login.mode == lmLocalDesktop
     check d.login.state == lsCompleted
 
+  test "a number past every target's int reads as the bound, never as a defect":
+    # A wire number such as `1e300` used to be converted with `.int`, which
+    # raises a RangeDefect under JS; the reader is lenient and holds it at
+    # the 32-bit bound every target's `int` holds.
+    let item = inboxItemFromJson(%*{"id": "s@1", "kind": "ended_turn", "position": 1e300})
+    check item.position == int(high(int32))
+    check inboxItemFromJson(%*{"id": "s@1", "position": -1e300}).position == int(low(int32))
+    let d = inboxItemDetailFromJson(%*{"kind": "async_feedback",
+      "feedback": {"id": "f", "minLength": -1e300, "maxLength": 1e300}})
+    check d.feedback.minLength == int(low(int32))
+    check d.feedback.maxLength == int(high(int32))
+    let r = inboxItemDetailFromJson(%*{"kind": "async_feedback",
+      "feedback": {"id": "f", "minLength": 1e300, "maxLength": -1e300}})
+    check r.feedback.minLength == int(high(int32))
+    check r.feedback.maxLength == int(low(int32))
+
 suite "the answer form's rules":
   test "free form and an ended turn need text":
     let q = InboxItemDetail(kind: ikBlockedQuestion, form: qfFreeForm)

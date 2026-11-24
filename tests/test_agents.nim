@@ -732,6 +732,92 @@ suite "nim-agents":
     check seen.contains("GET http://harbor.invalid/api/v1/sessions/session-rest/events/history?limit=10")
 
 
+suite "wire numbers past every target's int":
+  # Under JS `int` is 32 bits, and both `fieldNum(key).int` and std/json's
+  # `getInt` raise a RangeDefect on a wider wire integer such as 10000000000.
+  # nim-agents' readers are lenient: they hold such a number at the 32-bit
+  # bound on every target instead. The bodies are JSON text, parsed as the
+  # wire is, so the numbers are integers of the server's width.
+  let hi = int(high(int32))
+  let lo = int(low(int32))
+
+  test "an event read back from JSON":
+    let e = agentEventFromJson(parseJson("""{"kind": "file_edit", "line": 10000000000,
+      "linesAdded": 10000000000, "linesRemoved": -10000000000,
+      "inputTokens": 10000000000, "outputTokens": -10000000000,
+      "milestoneCompleted": 10000000000, "milestoneTotal": -10000000000}"""))
+    check e.line == hi
+    check e.linesAdded == hi and e.linesRemoved == lo
+    check e.inputTokens == hi and e.outputTokens == lo
+    check e.milestoneCompleted == hi and e.milestoneTotal == lo
+
+  test "an Agent Harbor event's raw fields":
+    let llm = harborEventToAgentEvent("session", eventFromJson(parseJson(
+      """{"type": "llm_request", "usage": {"input_tokens": 10000000000,
+          "output_tokens": -10000000000}}""")))
+    check llm.inputTokens == hi and llm.outputTokens == lo
+    let edit = harborEventToAgentEvent("session", eventFromJson(parseJson(
+      """{"type": "file_edit", "file_path": "a.nim", "line": 10000000000}""")))
+    check edit.line == hi
+
+  test "an ACP update's raw fields":
+    let update = parseJson("""{"sessionUpdate": "milestone_progress",
+      "completed": 10000000000, "total": -10000000000}""")
+    let turn = promptTurn(@[update,
+      parseJson("""{"sessionUpdate": "file_edit", "file_path": "a.nim",
+        "line_start": 10000000000, "lines_added": 10000000000,
+        "lines_removed": -10000000000}"""),
+      parseJson("""{"sessionUpdate": "diff", "file_path": "b.nim",
+        "start_line": -10000000000, "lines_added": -10000000000,
+        "lines_removed": 10000000000}""")])
+    var agents = fromAcp(newAcpClient(newFakeAcpTransport(@[turn])))
+    let session = agents.startSession("/repo")
+    let events = acpUpdatesToAgentEvents(session.id,
+        agents.sendPrompt(session, @[textBlock("go")]).updates)
+    var progress, edit, diff = -1
+    for i, e in events:
+      if e.kind == aekMilestoneProgress: progress = i
+      if e.kind == aekFileEdit: edit = i
+      if e.kind == aekDiff: diff = i
+    check progress >= 0 and edit >= 0 and diff >= 0
+    check events[diff].line == lo
+    check events[diff].linesAdded == lo and events[diff].linesRemoved == hi
+    check events[progress].milestoneCompleted == hi
+    check events[progress].milestoneTotal == lo
+    check events[edit].line == hi
+    check events[edit].linesAdded == hi and events[edit].linesRemoved == lo
+
+  test "changed files, a file's diff and milestone progress over REST":
+    let transport: HttpTransport = proc(req: HttpRequest): HttpResponse =
+      if req.url.contains("/diff/"):
+        return HttpResponse(status: 200, body: """{"path": "a.nim",
+          "linesAdded": 10000000000, "lines_removed": -10000000000,
+          "contextLines": 10000000000}""")
+      if req.url.contains("/files"):
+        return HttpResponse(status: 200, body: """{"items": [{"path": "a.nim",
+          "linesAdded": 10000000000, "lines_removed": -10000000000}],
+          "total": 10000000000, "page": 10000000000, "perPage": -10000000000,
+          "next_page": 10000000000}""")
+      if req.url.contains("/milestones"):
+        return HttpResponse(status: 200, body: """{"files": [{"path": "m.org",
+          "summary": {"totalMilestones": 10000000000,
+                      "completedMilestones": -10000000000,
+                      "progressPercent": 10000000000}}]}""")
+      HttpResponse(status: 404, body: "not found: " & req.url)
+    let client = fromHarbor(newHarborClient("http://harbor.invalid", transport))
+    let session = AgentSession(id: "s", taskId: "t", backend: abkHarbor)
+    let files = client.changedFiles(session)
+    check files.items[0].linesAdded == hi and files.items[0].linesRemoved == lo
+    check files.total == hi and files.page == hi
+    check files.perPage == lo and files.nextPage == hi
+    let diff = client.fileDiff(session, "a.nim")
+    check diff.linesAdded == hi and diff.linesRemoved == lo
+    check diff.contextLines == hi
+    let progress = client.milestoneProgress(session)
+    check progress.files[0].totalMilestones == hi
+    check progress.files[0].completedMilestones == lo
+    check progress.files[0].progressPercent == hi
+
 suite "common client role instructions":
   test "ACP role instructions use actual session/new metadata without a user primer":
     var requests: seq[JsonNode]

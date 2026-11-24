@@ -299,14 +299,6 @@ proc str(node: JsonNode; key: string): string =
   let v = node.getOrDefault(key)
   if v.isNil or v.kind != JString: "" else: v.getStr
 
-proc int0(node: JsonNode; key: string): int =
-  if node.isNil or node.kind != JObject: return 0
-  let v = node.getOrDefault(key)
-  if v.isNil: 0
-  elif v.kind == JInt: v.getInt
-  elif v.kind == JFloat: v.getFloat.int
-  else: 0
-
 proc milestoneFileProgressFromJson*(node: JsonNode): MilestoneFileProgress =
   result = MilestoneFileProgress(path: node.str("path"), title: node.str("title"),
                                  currentMilestone: node.str("currentMilestone"),
@@ -319,18 +311,18 @@ proc milestoneFileProgressFromJson*(node: JsonNode): MilestoneFileProgress =
       let v = m.getOrDefault("verifications")
       result.milestones.add MilestoneDetail(
         id: m.str("id"), title: m.str("title"), status: m.str("status"),
-        deliverables: DeliverableCounts(done: d.int0("done"), total: d.int0("total")),
-        verifications: VerificationCounts(passing: v.int0("passing"),
-                                          failing: v.int0("failing"),
-                                          pending: v.int0("pending")))
+        deliverables: DeliverableCounts(done: d.fieldInt("done"), total: d.fieldInt("total")),
+        verifications: VerificationCounts(passing: v.fieldInt("passing"),
+                                          failing: v.fieldInt("failing"),
+                                          pending: v.fieldInt("pending")))
   let s = if node.isNil or node.kind != JObject: nil else: node.getOrDefault("summary")
   if s.isNil:
     result.summarize()
   else:
     result.summary = MilestoneSummary(
-      totalMilestones: s.int0("totalMilestones"),
-      completedMilestones: s.int0("completedMilestones"),
-      progressPercent: s.int0("progressPercent"),
+      totalMilestones: s.fieldInt("totalMilestones"),
+      completedMilestones: s.fieldInt("completedMilestones"),
+      progressPercent: s.fieldInt("progressPercent"),
       currentMilestoneTitle: s.str("currentMilestoneTitle"))
 
 proc toJson*(progress: MilestoneFileProgress): JsonNode =

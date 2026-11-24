@@ -52,13 +52,22 @@ proc fieldStr*(node: JsonNode; key: string): string =
   if value.isNil or value.kind != JString: "" else: value.getStr
 
 proc fieldNum*(node: JsonNode; key: string): int64 =
-  ## An integer field (a float is truncated), or 0.
+  ## An integer field (a float is truncated, and held to the `int64` range;
+  ## NaN reads as 0), or 0. Use `fieldInt` for a field read into an `int`.
   if node.isNil or node.kind != JObject: return 0
   let value = node.getOrDefault(key)
   if value.isNil: return 0
   case value.kind
   of JInt: value.getBiggestInt.int64
-  of JFloat: value.getFloat.int64
+  of JFloat:
+    # Converting a float past the int64 range is undefined behaviour in C and
+    # a RangeDefect under JS, so the bounds are tested first. 2^63 is exactly
+    # representable as a float, and `high(int64)` is not.
+    let f = value.getFloat
+    if f != f: 0'i64                                     # NaN
+    elif f >= 9.223372036854775808e18: high(int64)       # >= 2^63
+    elif f <= -9.223372036854775808e18: low(int64)       # <= -2^63
+    else: f.int64
   else: 0
 
 proc fieldFlag*(node: JsonNode; key: string): bool =
@@ -71,6 +80,28 @@ proc fieldChild*(node: JsonNode; key: string): JsonNode =
   ## A field of any kind, or nil.
   if node.isNil or node.kind != JObject: return nil
   node.getOrDefault(key)
+
+proc toWireInt(n: int64): int =
+  ## `n` held to the 32-bit range: `int` is 32 bits under JS (`high(int)` is
+  ## 2^31-1 there), and converting a wider value to it raises a RangeDefect.
+  int(clamp(n, int64(low(int32)), int64(high(int32))))
+
+proc fieldInt*(node: JsonNode; key: string): int =
+  ## An integer field read into an `int`, held to the 32-bit range that `int`
+  ## holds on every target (a float is truncated, NaN reads as 0), or 0 when
+  ## absent or not a number. A reader never converts `fieldNum(key)` with
+  ## `.int`: that raises a RangeDefect under JS on a value such as `1e300`, and
+  ## the readers are lenient -- a number out of range reads as the bound.
+  toWireInt(node.fieldNum(key))
+
+proc wireInt*(node: JsonNode; default = 0): int =
+  ## A JSON integer read into an `int`, held to the 32-bit range that `int`
+  ## holds on every target, or `default` when `node` is nil or not an integer.
+  ## It is std/json's `getInt` without its RangeDefect: under JS `getInt`
+  ## raises on an integer past 2^31-1, such as a wire value of `10000000000`.
+  ## Wire readers use it, never `getInt`.
+  if node.isNil or node.kind != JInt: default
+  else: toWireInt(node.getBiggestInt)
 
 type
   PlanSteps* = object
