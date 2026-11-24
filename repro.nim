@@ -75,6 +75,9 @@
 ##
 ## ``tests/test_nimcache_is_worktree_local.nim`` is an ordinary native pair: it
 ## passes under ``repro`` because the repo-root ``config.nims`` still applies.
+## ``tests/test_activity_modules_are_transport_free.nim`` is native-only too:
+## it hands the search paths it was compiled with to the ``nim check`` probes
+## it runs, so it resolves the sibling libraries the way its BUILD edge did.
 ##
 ## **Per-test platform gating.** Re-derived from each file's imports + guards
 ## (the nimble/Justfile lists are the same five files; every one is
@@ -185,6 +188,11 @@ const agentsTestSpecs: seq[AgentsTestSpec] = @[
     binary: "build/test-bin/test_session_load_client", serial: false),
   AgentsTestSpec(source: "tests/test_nimcache_is_worktree_local.nim",
     binary: "build/test-bin/test_nimcache_is_worktree_local", serial: false),
+  # Native only: it runs `nim check` on probes of the activity modules with
+  # every ACP and Agent Harbor transport replaced by an `{.error.}` stub.
+  AgentsTestSpec(source: "tests/test_activity_modules_are_transport_free.nim",
+    binary: "build/test-bin/test_activity_modules_are_transport_free",
+    serial: false),
   AgentsTestSpec(source: "tests/test_review_record.nim",
     binary: "build/test-bin/test_review_record", serial: false),
   AgentsTestSpec(source: "tests/test_change_diff.nim",

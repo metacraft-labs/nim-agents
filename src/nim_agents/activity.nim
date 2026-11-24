@@ -1,8 +1,10 @@
 ## Opt-in, renderer-free conversation reducer. Import nim_agents/activity explicitly.
 ## Hosts own signals, editor permissions and supported response actions. Backend
 ## events cross the safe AgentEvent projection; raw frames are never inspected.
+## Transport-free: it imports `agent_events`, never `client` or a backend
+## transport, so host-free builds can compile it (see `agent_events`).
 import std/[strutils, sets]
-import ./client
+import ./agent_events
 
 type
   ActivityRole* = enum arUser, arAssistant, arActivity

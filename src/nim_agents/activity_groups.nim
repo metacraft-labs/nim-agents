@@ -101,8 +101,11 @@
 ## and an instruction's content appear in `body`, never in `line`.
 
 import std/[json, options, sets, strutils, tables]
-import nim_agent_harbor
-import ./[client, activity, activity_presentation]
+# Transport-free, like `activity`: the Agent Harbor wire types and the
+# `AgentEvent` projection, never a client or `nim_agent_harbor/native` (see
+# `agent_events`).
+import nim_agent_harbor/types
+import ./[agent_events, activity, activity_presentation]
 import ./agent_harbor/activity_words
 
 export options, activity, activity_presentation, activity_words

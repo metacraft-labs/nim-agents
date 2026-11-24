@@ -18,6 +18,7 @@ build-native:
     nim c {{paths}} tests/test_codex_acp_smoke.nim
     nim c {{paths}} tests/test_inject_prompt_client.nim
     nim c {{paths}} tests/test_nimcache_is_worktree_local.nim
+    nim c {{paths}} tests/test_activity_modules_are_transport_free.nim
     nim c {{paths}} tests/test_agent_harbor_domain.nim
     nim c {{paths}} tests/test_agent_harbor_fleet_fold.nim
     nim c {{paths}} tests/test_activity_groups.nim
@@ -82,6 +83,7 @@ test-native:
     nim c -r {{paths}} tests/test_codex_acp_smoke.nim
     nim c -r {{paths}} tests/test_inject_prompt_client.nim
     nim c -r {{paths}} tests/test_nimcache_is_worktree_local.nim
+    nim c -r {{paths}} tests/test_activity_modules_are_transport_free.nim
 
 test-js:
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_activity.nim
@@ -112,6 +114,7 @@ lint-nim:
     nim check {{paths}} tests/test_codex_acp_smoke.nim
     nim check {{paths}} tests/test_inject_prompt_client.nim
     nim check {{paths}} tests/test_nimcache_is_worktree_local.nim
+    nim check {{paths}} tests/test_activity_modules_are_transport_free.nim
     nim check {{paths}} tests/test_agent_harbor_domain.nim
     nim check {{paths}} tests/test_agent_harbor_fleet_fold.nim
     nim check {{paths}} tests/test_activity_groups.nim

@@ -1,7 +1,8 @@
 ## Opt-in semantic presentation over safe activity data. No renderer, signals,
 ## raw frames or host actions; a visible fact does not imply an action exists.
+## Transport-free, like `activity` (see `agent_events`).
 import std/strutils
-import ./[client, activity]
+import ./[agent_events, activity]
 
 type
   ActivityFact* = object
