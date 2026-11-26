@@ -32,6 +32,7 @@ build-native:
     nim c {{paths}} tests/test_activity_model.nim
     nim c {{paths}} tests/test_evidence_call.nim
     nim c {{paths}} tests/test_activity_text.nim
+    nim c {{paths}} tests/test_activity_feed.nim
     nim c {{paths}} tests/test_control_center.nim
     nim c {{paths}} tests/test_test_runs.nim
     nim c {{paths}} tests/test_trace_links.nim
@@ -53,6 +54,7 @@ build-js:
     nim js {{paths}} tests/test_activity_model.nim
     nim js {{paths}} tests/test_evidence_call.nim
     nim js {{paths}} tests/test_activity_text.nim
+    nim js {{paths}} tests/test_activity_feed.nim
     nim js {{paths}} tests/test_control_center.nim
     nim js {{paths}} tests/test_test_runs.nim
     nim js {{paths}} tests/test_trace_links.nim
@@ -77,6 +79,7 @@ test-native:
     nim c -r {{paths}} tests/test_activity_model.nim
     nim c -r {{paths}} tests/test_evidence_call.nim
     nim c -r {{paths}} tests/test_activity_text.nim
+    nim c -r {{paths}} tests/test_activity_feed.nim
     nim c -r {{paths}} tests/test_control_center.nim
     nim c -r {{paths}} tests/test_agent_harbor_domain.nim
     nim c -r {{paths}} tests/test_agent_harbor_fleet_fold.nim
@@ -107,6 +110,7 @@ test-js:
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_activity_model.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_evidence_call.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_activity_text.nim
+    bash tools/nim-js-test-gate.sh {{paths}} tests/test_activity_feed.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_control_center.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_agent_harbor_domain.nim
     bash tools/nim-js-test-gate.sh {{paths}} tests/test_agent_harbor_fleet_fold.nim
@@ -146,6 +150,7 @@ lint-nim:
     nim check {{paths}} tests/test_activity_model.nim
     nim check {{paths}} tests/test_evidence_call.nim
     nim check {{paths}} tests/test_activity_text.nim
+    nim check {{paths}} tests/test_activity_feed.nim
 
 lint-nix:
     nixfmt --check flake.nix
