@@ -158,6 +158,7 @@ const agentsJsBuildStems: seq[string] = @[
   "test_inbox", "test_instruction_composer", "test_result_commands",
   "test_suggested_actions", "test_prompt_context", "test_activity_model",
   "test_evidence_call", "test_activity_text", "test_activity_feed", "test_workspace", "test_agent_tabs", "test_diff_walk",
+  "test_test_run_model", "test_open_services",
   "test_control_center", "test_test_runs", "test_trace_links",
 ]
 const agentsJsTestStems: seq[string] = @[
@@ -167,6 +168,7 @@ const agentsJsTestStems: seq[string] = @[
   "test_inbox", "test_instruction_composer", "test_result_commands",
   "test_suggested_actions", "test_prompt_context", "test_activity_model",
   "test_evidence_call", "test_activity_text", "test_activity_feed", "test_workspace", "test_agent_tabs", "test_diff_walk",
+  "test_test_run_model", "test_open_services",
   "test_control_center", "test_test_runs", "test_trace_links",
 ]
 
@@ -227,6 +229,10 @@ const agentsTestSpecs: seq[AgentsTestSpec] = @[
     binary: "build/test-bin/test_agent_tabs", serial: false),
   AgentsTestSpec(source: "tests/test_diff_walk.nim",
     binary: "build/test-bin/test_diff_walk", serial: false),
+  AgentsTestSpec(source: "tests/test_test_run_model.nim",
+    binary: "build/test-bin/test_test_run_model", serial: false),
+  AgentsTestSpec(source: "tests/test_open_services.nim",
+    binary: "build/test-bin/test_open_services", serial: false),
   AgentsTestSpec(source: "tests/test_control_center.nim",
     binary: "build/test-bin/test_control_center", serial: false),
   AgentsTestSpec(source: "tests/test_agents.nim",

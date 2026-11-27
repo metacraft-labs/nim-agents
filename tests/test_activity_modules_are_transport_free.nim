@@ -56,6 +56,12 @@ const
     "nim_agents/activity",
     "nim_agents/activity_presentation",
     "nim_agents/activity_groups",
+    # The Agent Activity viewmodel's host seams and run model (CTF-M1 D87 (a),
+    # D90), which CodeTracer's host-free views reach through
+    # nim-agents-isonim-viewmodels' `agent_panels/agent_activity_vm`.
+    "nim_agents/test_run_model",
+    "nim_agents/trace_open",
+    "nim_agents/review_open",
   ]
     ## The modules that must reach no transport.
 
