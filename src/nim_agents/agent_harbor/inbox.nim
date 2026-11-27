@@ -20,12 +20,17 @@
 ## with the server it comes from, and ids are unique only on their server.
 ##
 ## **The cursor.** Previous and Next walk a cursor the server keeps per user
-## (proposed `POST /api/v1/inbox/cursors/{name}/next` and `…/prev`): Next
-## goes to the top of the current order, excluding the item on screen, so an
-## item already visited is offered again when it is on top; Previous walks
-## back through the items visited, not through the order. `InboxCursor` with
-## `cursorNext` and `cursorPrev` is that rule, for a data source that stands
-## in for such a server; a view never keeps its own order or stack.
+## (`POST /api/v1/inbox/cursors/{name}/next` and `…/prev`): Next goes to the
+## top of the current order, excluding the item on screen, so an item already
+## visited is offered again when it is on top; Previous walks back through the
+## items visited that still wait, not through the order, and with none left
+## wraps to the last item; an item that leaves the inbox is on no cursor.
+## `InboxCursor` with `walkNext` and `walkPrev` is that rule, for a data
+## source that stands in for such a server; a view never keeps its own order
+## or stack. `cursorNext` and `cursorPrev` are the rule before it (an item
+## that left stays on the stack, and Previous does not wrap), kept, deprecated,
+## until their callers move. The front-end's half -- pressing without waiting,
+## from the targets the server hands out in advance -- is `inbox_cursor`.
 ##
 ## **Item pages.** `InboxItemDetail` is what one item's page shows: the
 ## question and its options, an agent's permission options, sudo and network
@@ -497,11 +502,24 @@ proc applyInboxEvent*(snapshot: var InboxSnapshot; event: InboxEvent): bool =
 # The cursor (what a server keeps per user and cursor name)
 # ---------------------------------------------------------------------------
 
-proc cursorNext*(order: openArray[InboxItemRef]; cursor: var InboxCursor):
+proc listed(order: openArray[InboxItemRef]; r: InboxItemRef): bool =
+  for x in order:
+    if x == r: return true
+  false
+
+proc settle(order: openArray[InboxItemRef]; cursor: var InboxCursor) =
+  ## An item that left the inbox stays on no cursor: a cursor on it moves to
+  ## nothing.
+  if not cursor.current.isNone and not order.listed(cursor.current):
+    cursor.current = InboxItemRef()
+
+proc walkNext*(order: openArray[InboxItemRef]; cursor: var InboxCursor):
     tuple[moved: bool, item: InboxItemRef] =
   ## Next: the top of the current order, excluding the item on screen. The
-  ## item left is pushed on the visited stack. Nothing moves when no other
-  ## item waits.
+  ## item left is pushed on the visited stack (an item that left the inbox is
+  ## on no cursor, so nothing is pushed then, and Next starts from the top).
+  ## Nothing moves when no other item waits.
+  order.settle(cursor)
   for r in order:
     if r != cursor.current:
       if not cursor.current.isNone: cursor.visited.add cursor.current
@@ -509,9 +527,45 @@ proc cursorNext*(order: openArray[InboxItemRef]; cursor: var InboxCursor):
       return (true, r)
   (false, cursor.current)
 
-proc cursorPrev*(cursor: var InboxCursor): tuple[moved: bool, item: InboxItemRef] =
-  ## Previous: back to the item visited last (whether or not it still
-  ## waits), popping it from the stack; nothing moves when none was visited.
+proc walkPrev*(order: openArray[InboxItemRef]; cursor: var InboxCursor):
+    tuple[moved: bool, item: InboxItemRef] =
+  ## Prev: pops the visited stack to the most recent item still listed,
+  ## discarding the items that left on the way. With nothing left on the
+  ## stack it wraps to the last item of the order. With no item at all the
+  ## cursor is on nothing.
+  order.settle(cursor)
+  while cursor.visited.len > 0:
+    let r = cursor.visited.pop()
+    if order.listed(r):
+      cursor.current = r
+      return (true, r)
+  if order.len == 0: return (false, cursor.current)
+  let last = order[^1]
+  if last == cursor.current: return (false, last)
+  cursor.current = last
+  (true, last)
+
+proc cursorNext*(order: openArray[InboxItemRef]; cursor: var InboxCursor):
+    tuple[moved: bool, item: InboxItemRef] {.
+    deprecated: "the rule before the approved one: use walkNext, " &
+                "which pushes no item that left the inbox".} =
+  ## Next by the superseded rule: the top of the current order, excluding the
+  ## item on screen; the item left is pushed on the visited stack, whether or
+  ## not it still waits. Nothing moves when no other item waits. Kept until
+  ## its last caller moves to `walkNext`.
+  for r in order:
+    if r != cursor.current:
+      if not cursor.current.isNone: cursor.visited.add cursor.current
+      cursor.current = r
+      return (true, r)
+  (false, cursor.current)
+
+proc cursorPrev*(cursor: var InboxCursor): tuple[moved: bool, item: InboxItemRef] {.
+    deprecated: "the rule before the approved one: use walkPrev, " &
+                "which skips items that left and wraps to the last".} =
+  ## Previous by the superseded rule: back to the item visited last, whether
+  ## or not it still waits; nothing moves when none was visited. Kept until
+  ## its last caller moves to `walkPrev`.
   if cursor.visited.len == 0: return (false, cursor.current)
   cursor.current = cursor.visited.pop()
   (true, cursor.current)
