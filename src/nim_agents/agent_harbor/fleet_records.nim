@@ -436,6 +436,36 @@ proc sessionEventHistoryFromJson*(sessionId: string;
     for i in countdown(events.len - 1, 0):
       result.rawEvents.add(events[i])
 
+proc lifecycleFrameOf*(event, data, id: string): LifecycleFrame =
+  ## One frame of the lifecycle feed from its SSE fields: the event name
+  ## (`message` when empty), the `data` JSON and the `id`. A frame without an
+  ## id (`resync`, `caught_up`) takes its cursor from its data. Data that is
+  ## not JSON, or carries a malformed `at`, keeps the frame with what was read
+  ## before the failure, so a consumer still sees its event and cursor.
+  ## The capture reader below and a live feed share it.
+  result = LifecycleFrame(event: if event.len > 0: event else: "message",
+                          cursor: id)
+  var node: JsonNode
+  try:
+    node = parseJson(data)
+  except CatchableError:
+    return
+  except:
+    # JavaScript's own parser raises a foreign exception, not a Nim one.
+    return
+  try:
+    result.kind = node.str("kind")
+    result.sessionId = node.str("sessionId")
+    result.status = node.str("status")
+    result.previousStatus = node.str("previousStatus")
+    result.agent = node.str("agent")
+    result.executor = node.str("executor")
+    result.reason = node.str("reason")
+    result.atMs = parseIsoMs(node.str("at"))
+    if result.cursor.len == 0: result.cursor = node.str("cursor")
+  except JsonParsingError, ValueError:
+    discard
+
 proc parseLifecycleSse*(text: string): seq[LifecycleFrame] =
   ## Frames of an SSE capture of the lifecycle feed. Implements the parts of
   ## the event-stream format the feed uses: `event:`, `data:` (joined by
@@ -445,22 +475,7 @@ proc parseLifecycleSse*(text: string): seq[LifecycleFrame] =
   var id = ""
   proc dispatch(frames: var seq[LifecycleFrame]) =
     if data.len == 0 and event.len == 0: return
-    var frame = LifecycleFrame(event: if event.len > 0: event else: "message",
-                               cursor: id)
-    try:
-      let node = parseJson(data)
-      frame.kind = node.str("kind")
-      frame.sessionId = node.str("sessionId")
-      frame.status = node.str("status")
-      frame.previousStatus = node.str("previousStatus")
-      frame.agent = node.str("agent")
-      frame.executor = node.str("executor")
-      frame.reason = node.str("reason")
-      frame.atMs = parseIsoMs(node.str("at"))
-      if frame.cursor.len == 0: frame.cursor = node.str("cursor")
-    except JsonParsingError, ValueError:
-      discard
-    frames.add(frame)
+    frames.add(lifecycleFrameOf(event, data, id))
     event = ""
     data = ""
   for rawLine in text.splitLines:

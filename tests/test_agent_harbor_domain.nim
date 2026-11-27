@@ -193,6 +193,40 @@ suite "the session directory":
     dir.replaceAll([FleetSession(id: "x")])
     check not dir.resyncing
 
+  test "one feed frame decodes as the capture reader decodes it":
+    # Frames as a real `ah server` (0.6.17-dev, 2026-11-27) sent them; the
+    # live source hands each frame's event, data and id to lifecycleFrameOf.
+    const created = "{\"kind\":\"session_created\",\"sessionId\":\"5a7e0c1d\"," &
+      "\"status\":\"queued\",\"agent\":\"acp\",\"repo\":\"file:///tmp/r\"," &
+      "\"at\":\"2026-11-27T05:20:42.357983498Z\"}"
+    const resync = "{\"cursor\":\"ec97071de8b44550-0\",\"reason\":\"no_cursor\"}"
+    const caughtUp = "{\"cursor\":\"ec97071de8b44550-3\",\"replayed\":2}"
+    let a = lifecycleFrameOf("lifecycle", created, "ec97071de8b44550-1")
+    check a.event == "lifecycle"
+    check a.kind == "session_created"
+    check a.sessionId == "5a7e0c1d"
+    check a.status == "queued"
+    check a.agent == "acp"
+    check a.cursor == "ec97071de8b44550-1"
+    check a.atMs > 0
+    # A frame without an id takes its cursor from its data.
+    let r = lifecycleFrameOf("resync", resync, "")
+    check r.event == "resync"
+    check r.reason == "no_cursor"
+    check r.cursor == "ec97071de8b44550-0"
+    let c = lifecycleFrameOf("caught_up", caughtUp, "")
+    check c.cursor == "ec97071de8b44550-3"
+    # An event name left out reads as `message`; undecodable data keeps the
+    # frame with its event and cursor and no fields.
+    check lifecycleFrameOf("", created, "x").event == "message"
+    let bad = lifecycleFrameOf("lifecycle", "not json", "e-9")
+    check bad.kind == ""
+    check bad.cursor == "e-9"
+    # The capture reader decodes through the same procedure.
+    check parseLifecycleSse("event: lifecycle\ndata: " & created &
+      "\nid: ec97071de8b44550-1\n\n") == @[a]
+    check parseLifecycleSse("event: resync\ndata: " & resync & "\n\n") == @[r]
+
   test "attention order puts the sessions that need a person first":
     let sessions = [
       FleetSession(id: "ended", status: fsCompleted, updatedAtMs: 50),
